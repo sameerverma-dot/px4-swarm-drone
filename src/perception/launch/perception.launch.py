@@ -4,32 +4,38 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
+# Gazebo camera topic for the x500_mono_cam_down model in world "default".
+CAM_TOPIC = ('/world/default/model/x500_mono_cam_down_0/'
+             'link/camera_link/sensor/camera/image')
+
+# CRITICAL: PX4 launches the Gazebo server with GZ_IP=127.0.0.1 (see PX4's
+# gz_bridge CMake rule). gz-transport discovery is multicast, so an external
+# process WITHOUT GZ_IP set still SEES the topic (`gz topic -l` lists it) but
+# never establishes the data connection -> zero messages, silently.
+# Every process that subscribes to a gz topic must use the same GZ_IP.
+GZ_ENV = {'GZ_IP': '127.0.0.1'}
+
 
 def generate_launch_description():
-    # Default gz camera topic for the x500_mono_cam_down model, world "default".
-    # Confirm the exact name on the running sim with:  gz topic -l | grep -i image
-    default_cam = ('/world/default/model/x500_mono_cam_down_0/'
-                   'link/camera_link/sensor/camera/image')
-
     args = [
-        DeclareLaunchArgument('cam_gz_topic', default_value=default_cam),
-        DeclareLaunchArgument('image_topic', default_value='/drone/camera'),
+        DeclareLaunchArgument('cam_gz_topic', default_value=CAM_TOPIC),
         DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
         DeclareLaunchArgument('conf', default_value='0.25'),
         DeclareLaunchArgument('classes', default_value=''),
+        DeclareLaunchArgument('gz_ip', default_value='127.0.0.1'),
     ]
 
     cam = LaunchConfiguration('cam_gz_topic')
-    image_topic = LaunchConfiguration('image_topic')
 
-    # Gazebo -> ROS 2 image bridge (gz.msgs.Image -> sensor_msgs/Image, read-only).
+    # Gazebo -> ROS 2 image bridge. No remap: the detector subscribes to the
+    # same name the bridge publishes, which removes the earlier mismatch.
     bridge = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
         name='camera_bridge',
         output='screen',
         arguments=[[cam, '@sensor_msgs/msg/Image[gz.msgs.Image']],
-        remappings=[(cam, image_topic)],
+        additional_env=GZ_ENV,
     )
 
     detector = Node(
@@ -38,11 +44,12 @@ def generate_launch_description():
         name='detector_node',
         output='screen',
         parameters=[{
-            'image_topic': image_topic,
+            'image_topic': cam,
             'weights': ParameterValue(LaunchConfiguration('weights'), value_type=str),
             'conf': ParameterValue(LaunchConfiguration('conf'), value_type=float),
             'classes': ParameterValue(LaunchConfiguration('classes'), value_type=str),
         }],
+        additional_env=GZ_ENV,
     )
 
     return LaunchDescription(args + [bridge, detector])

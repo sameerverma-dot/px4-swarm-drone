@@ -137,6 +137,34 @@ if command -v tmux >/dev/null 2>&1; then
     # Bring up QGroundControl alongside the sim (its own window).
     launch_qgc
 
+    # ---- auto-set SITL "no RC / no GCS" failsafe params ------------------
+    # SITL has no RC transmitter and no GCS heartbeat, so PX4's failsafes
+    # block arming and Mission/Offboard mode:
+    #   "No manual control input"  /  "No connection to the GCS"
+    # Once PX4 has booted, type these into the pxh> console and save them so
+    # they persist (survives restarts until a clean rebuild):
+    #   COM_RC_IN_MODE 4  -> stick input disabled: no manual control source
+    #                        required (clears "No manual control input")
+    #   COM_RCL_EXCEPT 7  -> except Mission+Hold+Offboard from the RC-loss
+    #                        check (bit0 Mission, bit1 Hold, bit2 Offboard)
+    #   NAV_RCL_ACT   0   -> disable RC-loss failsafe action
+    #   NAV_DLL_ACT   0   -> disable datalink(GCS)-loss failsafe action
+    #   CBRK_SUPPLY_CHK 894281 -> disable the (sim-irrelevant) power check
+    (
+        for _ in $(seq 1 90); do
+            grep -q "Startup script returned successfully" \
+                "$LOG_DIR/px4_sitl.log" 2>/dev/null && break
+            sleep 1
+        done
+        sleep 2
+        for p in "COM_RC_IN_MODE 4" "COM_RCL_EXCEPT 7" "NAV_RCL_ACT 0" "NAV_DLL_ACT 0" "CBRK_SUPPLY_CHK 894281"; do
+            tmux send-keys -t "$px4_pane" "param set $p" Enter
+            sleep 0.4
+        done
+        tmux send-keys -t "$px4_pane" "param save" Enter
+    ) &
+    echo "SITL params:  auto-setting no-RC/no-GCS failsafe params after boot"
+
     echo "Attaching to tmux session '$SESSION'."
     echo "  Ctrl-b d   → detach (stack keeps running)"
     echo "  tmux attach -t $SESSION   → reattach later"

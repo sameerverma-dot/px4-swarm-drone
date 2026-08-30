@@ -1,19 +1,18 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 30 Aug 2026. Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
+_Last updated: 31 Aug 2026. Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
 
 ## 1. Summary of status
 
-The **software / autonomy / AI pipeline is built and working end-to-end in
-code**. A single drone can autonomously survey a specified area and return,
-via two independent paths (a QGroundControl Survey mission, and a custom ROS 2
-node). The **AI detection pipeline is written and builds cleanly** and is
-waiting on one thing: a working camera image out of Gazebo, which is currently
-blocked by a **GPU/graphics rendering issue specific to this hybrid-GPU laptop**
-(details in section 5).
+The **software / autonomy / AI pipeline is built and working end-to-end.**
+A single drone autonomously surveys a specified area and returns, via two
+independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
+The **AI detection pipeline is live**: the downward camera streams into ROS 2,
+YOLO runs on the feed, and annotated frames publish at ~2 Hz. What remains for
+the detection deliverable is a *detectable target* — the plumbing is done.
 
 | Capability | Status |
 |---|---|
@@ -24,9 +23,9 @@ blocked by a **GPU/graphics rendering issue specific to this hybrid-GPU laptop**
 | Autonomous area survey — QGC "draw polygon" mission | ✅ Working (demonstrated) |
 | Downward camera model in sim (`x500_mono_cam_down`) | ✅ Model + airframe confirmed |
 | Gazebo camera → ROS 2 bridge (`ros_gz_bridge`) | ✅ Configured & launches |
-| YOLO detector node (`perception`) | ✅ Built; loads model; waiting on camera frames |
-| **Gazebo actually producing camera frames** | ❌ Blocked (GPU render — section 5) |
-| Geotagged hazard map / CSV | ⚙️ Code ready; needs detections |
+| YOLO detector node (`perception`) | ✅ **Working** — ~2 Hz on `/detection/image_annotated` |
+| **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
+| Geotagged hazard map / CSV | ⚙️ Running; needs a detectable target in the world |
 | Multi-drone swarm (2–5) | ⬜ Not started |
 
 ---
@@ -58,10 +57,13 @@ blocked by a **GPU/graphics rendering issue specific to this hybrid-GPU laptop**
 - QGC Plan view → Pattern → Survey → draw polygon with clicked points → set transect spacing → Upload → Start Mission.
 - **Demonstrated working**: drew an area over the IITGN field and the drone flew the full transect pattern autonomously and returned. This is the fastest "draw an area and survey it" path.
 
-### 3.4 Detection pipeline — ROS 2 package `perception` (code complete)
+### 3.4 Detection pipeline — ROS 2 package `perception` (WORKING)
 - `detector_node`: subscribes to the camera image, runs **Ultralytics YOLO**, publishes an annotated image (`/detection/image_annotated`), and geotags detections (nadir projection from drone pose) into `~/maps/hazard_points.csv`, de-duplicated by distance.
 - Launch also starts the **Gazebo→ROS 2 camera bridge** (`ros_gz_bridge`).
-- Builds clean; the detector starts and loads `yolov8n.pt`. Confirmed the camera model, topic name, bridge, and detector all line up in ROS 2.
+- **Verified live**: `ros2 topic hz /detection/image_annotated` → ~2 Hz. Full chain
+  Gazebo camera → gz-transport → `ros_gz_bridge` → ROS 2 → YOLO → annotated frames.
+- View it: `ros2 run rqt_image_view rqt_image_view /detection/image_annotated`
+  (grey image is correct — the default world's ground plane is light grey).
 - **Note:** default `yolov8n.pt` = COCO classes (people/cars), not landmines. Swap in trained weights via `weights:=~/runs/.../best.pt` for real detection.
 
 ---
@@ -88,33 +90,51 @@ Camera gz topic: `/world/default/model/x500_mono_cam_down_0/link/camera_link/sen
 
 ---
 
-## 5. The current blocker — Gazebo camera not rendering
+## 5. SOLVED — camera frames now reach ROS 2 (was a `GZ_IP` mismatch)
 
-**Symptom:** with the `x500_mono_cam_down` model, the camera topic is advertised
-(`gz topic -l` lists it) but publishes **no frames** (`gz topic -e` stays blank;
-a live 30 fps stream would flood the terminal). So the detector has nothing to
-process. The detector, bridge, and node are all correct — Gazebo simply isn't
-producing images.
+**Symptom (now fixed):** with `x500_mono_cam_down`, the camera topic was
+advertised (`gz topic -l` listed it) but delivered **no frames** to any external
+subscriber — `gz topic -e` blank, `ros_gz_bridge` silent, detector starved.
 
-**Root cause:** Gazebo renders camera **sensors** through a headless **EGL**
-context ("Render Engine Server Headless"), and on this Intel+NVIDIA (Optimus)
-laptop that path fails. The GUI window renders fine (it uses GLX, which
-`prime-run` fixes), but the sensor EGL path does not.
+**The camera was never broken.** Gazebo's own server log proves it rendered
+correctly in every run (`~/.gz/sim/log/<run>/server_console.log`):
 
-**What was tried:**
-| Attempt | Result |
-|---|---|
-| `prime-run` (NVIDIA GLX offload) | `libEGL: failed to create dri2 screen` → no frames |
-| Force NVIDIA EGL vendor (`__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json` + `__NV_PRIME_RENDER_OFFLOAD=1`) | **dri2 crash cleared** ✅, but still no camera frames |
-| `LIBGL_ALWAYS_SOFTWARE=1` (CPU render) | Refused: "Not allowed to force software rendering when API explicitly selects a hardware device" → dri2 error returns |
+```
+[Sensors.cc:391]      Rendering Thread initialized
+[CameraSensor.cc:504] Enabling camera sensor: '...camera' data generation.
+[GstCameraSystem.cpp:281] Camera info: 1280x960
+[GstCameraSystem.cpp:475] GStreamer pipeline started, streaming to 127.0.0.1:5600
+```
 
-**Next options for the camera (to try hands-on / with the lab):**
-1. Add an explicit `Sensors` system plugin to the world with `<render_engine>ogre</render_engine>` (try Ogre v1 instead of ogre2).
-2. Verify NVIDIA driver + EGL device enumeration (`eglinfo`, `nvidia-smi`), ensure the RTX is the EGL device used for the headless render.
-3. Test on a cleaner single-GPU machine or a lab workstation — Gazebo camera rendering on hybrid laptops is a known pain point; someone at Maker Bhavan has likely solved it.
+PX4's in-process `GstCameraSystem` was consuming real 1280×960 frames and
+streaming H.264 the whole time.
 
-**This does not block the rest of the project** — detection can be developed and
-demonstrated on recorded/test images while the camera render is fixed separately.
+**Actual root cause:** PX4 launches the Gazebo server with **`GZ_IP=127.0.0.1`**
+(visible in `px4_sitl.log`). gz-transport separates *discovery* from *data*:
+
+| Stage | Mechanism | With mismatched `GZ_IP` |
+|---|---|---|
+| Discovery | UDP multicast | ✅ works → topic **is listed** |
+| Data | direct ZeroMQ to publisher's advertised address | ❌ never connects |
+
+So any process without `GZ_IP=127.0.0.1` **sees the topic and receives nothing**,
+silently, with no error either side. PX4's own consumer worked because it runs
+*inside* the server process and inherits the env.
+
+**Fix (applied):** `src/perception/launch/perception.launch.py` sets
+`additional_env={'GZ_IP': '127.0.0.1'}` on both the bridge and the detector, and
+the earlier topic remap was removed. For ad-hoc shells: `export GZ_IP=127.0.0.1`.
+
+**Verified:** `ros2 topic hz /detection/image_annotated` → ~2 Hz.
+Chain confirmed: Gazebo camera → gz-transport → ros_gz_bridge → ROS 2 → YOLO.
+
+**Red herring for the record:** `libEGL: failed to create dri2 screen` and
+`eglInitialize failed` looked fatal but are noise — `~/.gz/rendering/ogre2.log`
+shows Ogre probing 4 EGL devices, 3 succeeding, running on the RTX 4060. Hours
+were lost chasing this. **A loud warning is not automatically the cause.**
+
+**Performance note:** ~2 Hz is YOLO on CPU at 1280×960. For a smoother demo drop
+`Tools/simulation/gz/models/mono_cam/model.sdf` to 640×480 and `update_rate` 10.
 
 ---
 
@@ -125,6 +145,15 @@ demonstrated on recorded/test images while the camera render is fixed separately
 - Do **not** pipe PX4 through `| tee` — it makes the pxh console non-interactive (launcher uses tmux `pipe-pane` for logging instead).
 - Arming from ROS 2 without a GCS: set `NAV_DLL_ACT=0` and `CBRK_SUPPLY_CHK=894281` (or just run QGC, which satisfies the GCS check).
 - Gazebo must render on the RTX (`prime-run`) or it's unusably slow.
+- **gz-transport: "topic listed but no data" ⇒ `GZ_IP` mismatch, NOT rendering.**
+  PX4 runs the gz server with `GZ_IP=127.0.0.1`; every external subscriber
+  (`gz topic`, `ros_gz_bridge`, custom nodes) must set it too.
+- **`~/.gz/sim/log/<timestamp>/server_console.log` is the first file to open**
+  when anything Gazebo-side misbehaves; `~/.gz/rendering/ogre2.log` for render.
+- PX4 ships its own gz plugin config at
+  `~/PX4-Autopilot/src/modules/simulation/gz_bridge/server.config` (not `/usr/share/gz/...`).
+- Mission mode refusing to start ("No manual control input"): set `COM_RC_IN_MODE 4`
+  (plus `COM_RCL_EXCEPT 7`, `NAV_RCL_ACT 0`); the launcher now sets these automatically.
 - PX4 `/fmu/*` topics are **best-effort QoS** — `ros2 topic echo` needs `--qos-reliability best_effort`.
 - Correct ROS 2 topic names for this PX4 are **unversioned** (`/fmu/out/vehicle_local_position`, etc.).
 - `pip install --user ultralytics` bumps setuptools to 84 and **breaks colcon** (needs <80). Fix: `pip install --user "setuptools==70.3.0"`.
@@ -135,8 +164,8 @@ demonstrated on recorded/test images while the camera render is fixed separately
 
 ## 7. Recommended next steps
 
-1. **Prove detection now** — feed the detector a test image (bypassing the camera) so YOLO detect → annotate → geotag is demonstrated today (M3/M5 deliverable).
-2. **Fix the Gazebo camera** — pursue the options in section 5, ideally at a lab workstation.
+1. **Get a first real detection** — insert a COCO-class model (person/vehicle) into the Gazebo world under the survey area, fly a survey, and confirm a box in `rqt_image_view`, a `HAZARD #n` log line, and a row in `~/maps/hazard_points.csv`. That closes the M3/M5 loop.
+2. **Speed up** — camera to 640×480 @ 10 Hz for a smoother demo.
 3. **Train landmine weights** — build a small dataset, train YOLO, drop `best.pt` into the detector.
 4. **Scale to swarm (2–5)** — extend the launcher to spawn namespaced PX4 instances (`/px4_1`, `/px4_2`, …) and split a drawn area across drones.
 5. **Hardware track (Track B)** — 50% of the grade is self-designed/Make parts + a DFM + FEA/CFD design report; run this in parallel (see `PHASE1_ROADMAP.md`).
