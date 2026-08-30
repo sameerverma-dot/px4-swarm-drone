@@ -61,6 +61,9 @@ class DetectorNode(Node):
         self.declare_parameter('hazard_csv', '~/maps/hazard_points.csv')
         self.declare_parameter('min_sep_m', 2.0)            # dedup radius (metres)
         self.declare_parameter('classes', '')               # '' = all; else CSV of names to keep
+        self.declare_parameter('device', '')                # '' = auto (cuda if available), else 'cuda:0'/'cpu'
+        self.declare_parameter('imgsz', 640)                # inference size; smaller = much faster
+        self.declare_parameter('half', True)                # fp16 on GPU (ignored on CPU)
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -71,11 +74,44 @@ class DetectorNode(Node):
         self.publish_annotated = bool(gp('publish_annotated').value)
         self.hazard_csv = os.path.expanduser(str(gp('hazard_csv').value))
         self.min_sep = float(gp('min_sep_m').value)
+        self.imgsz = int(gp('imgsz').value)
+        self.half_req = bool(gp('half').value)
         keep = str(gp('classes').value).strip()
         self.keep = set(s.strip() for s in keep.split(',') if s.strip()) if keep else None
 
+        # ---- device selection (explicit, and logged) ----
+        dev = str(gp('device').value).strip()
+        cuda_ok = False
+        try:
+            import torch
+            cuda_ok = torch.cuda.is_available()
+            gpu_name = torch.cuda.get_device_name(0) if cuda_ok else 'n/a'
+            self.get_logger().info(
+                f"torch {torch.__version__} | CUDA available: {cuda_ok} | GPU: {gpu_name}")
+            if not cuda_ok:
+                self.get_logger().warn(
+                    "CUDA NOT available -> YOLO will run on CPU (slow). Install a CUDA "
+                    "build of torch:  pip install --user --force-reinstall torch "
+                    "--index-url https://download.pytorch.org/whl/cu121")
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f"torch probe failed: {e}")
+        self.device = dev if dev else ('cuda:0' if cuda_ok else 'cpu')
+        self.half = bool(self.half_req and str(self.device).startswith('cuda'))
+
         self.get_logger().info(f"loading YOLO weights: {self.weights}")
         self.model = YOLO(self.weights)
+        try:
+            self.model.to(self.device)
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f"model.to({self.device}) failed: {e}")
+        if self.half:
+            try:
+                self.model.model.half()   # one-time fp16 cast, no per-frame warning
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().warn(f"fp16 cast skipped: {e}")
+                self.half = False
+        self.get_logger().info(
+            f"inference device={self.device} imgsz={self.imgsz} fp16={self.half}")
 
         # camera / pose state
         self.pos = VehicleLocalPosition()
@@ -172,7 +208,19 @@ class DetectorNode(Node):
         if frame is None:
             return
         self.frame_count += 1
-        results = self.model(frame, conf=self.conf, verbose=False)
+        if self.frame_count % 50 == 0:
+            now = time.time()
+            prev = getattr(self, '_t_last', None)
+            self._t_last = now
+            if prev:
+                self.get_logger().info(
+                    f"{50.0 / max(now - prev, 1e-6):.1f} FPS through detector "
+                    f"(device={self.device})")
+        # NOTE: 'half' is deprecated in ultralytics >=8.4 (warns once per frame and
+        # floods the log). Weights are already moved to fp16 on GPU below at load
+        # time, so we simply don't pass it here.
+        results = self.model(frame, conf=self.conf, imgsz=self.imgsz,
+                             device=self.device, verbose=False)
         r = results[0]
         img_h, img_w = frame.shape[:2]
 

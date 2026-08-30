@@ -1,7 +1,8 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 31 Aug 2026. Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
+_Last updated: 31 Aug 2026 (GPU inference verified; ~2 Hz bottleneck traced upstream)._
+_Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
 
@@ -23,7 +24,8 @@ the detection deliverable is a *detectable target* — the plumbing is done.
 | Autonomous area survey — QGC "draw polygon" mission | ✅ Working (demonstrated) |
 | Downward camera model in sim (`x500_mono_cam_down`) | ✅ Model + airframe confirmed |
 | Gazebo camera → ROS 2 bridge (`ros_gz_bridge`) | ✅ Configured & launches |
-| YOLO detector node (`perception`) | ✅ **Working** — ~2 Hz on `/detection/image_annotated` |
+| YOLO detector node (`perception`) | ✅ **Working on GPU** (cuda:0, RTX 4060, fp16, imgsz 640) |
+| Pipeline throughput | ⚠️ ~2 Hz — bottleneck is upstream of YOLO (see 5.1) |
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
 | Geotagged hazard map / CSV | ⚙️ Running; needs a detectable target in the world |
 | Multi-drone swarm (2–5) | ⬜ Not started |
@@ -136,6 +138,36 @@ were lost chasing this. **A loud warning is not automatically the cause.**
 **Performance note:** ~2 Hz is YOLO on CPU at 1280×960. For a smoother demo drop
 `Tools/simulation/gz/models/mono_cam/model.sdf` to 640×480 and `update_rate` 10.
 
+### 5.1 Open item — pipeline runs at ~2 Hz (bottleneck is NOT YOLO)
+
+**Measured:** `ros2 topic hz /detection/image_annotated` → ~2 Hz, both on CPU
+**and** after moving inference to the GPU. Startup confirms the GPU is really in
+use:
+
+```
+torch 2.13.0+cu130 | CUDA available: True | GPU: NVIDIA GeForce RTX 4060 Laptop GPU
+inference device=cuda:0 imgsz=640 fp16=True
+```
+
+**Conclusion:** YOLOv8n at 640px on an RTX 4060 runs at 100+ FPS, so inference is
+not the limit. Moving to the GPU changed nothing → the constraint is **upstream**
+of the detector. Remaining suspects, in order:
+
+1. **Camera resolution / transport** — 1280×960 RGB ≈ **3.7 MB per frame** pushed
+   through gz-transport → `ros_gz_bridge` → ROS 2 DDS. Almost certainly dominant.
+2. **Gazebo sensor render rate under lockstep** — PX4 locksteps the sim; with
+   RTF well under 100% the camera cannot hit its nominal 30 Hz.
+3. Bridge serialisation overhead (gz.msgs.Image → sensor_msgs/Image copy).
+
+**Next action (untried):** drop the camera in
+`~/PX4-Autopilot/Tools/simulation/gz/models/mono_cam/model.sdf` to
+`640×480` and `<update_rate>10</update_rate>`. That cuts per-frame payload ~4×
+and attacks suspect #1 directly. Re-measure with `ros2 topic hz` afterwards.
+
+**Note:** ~2 Hz is *sufficient* for a survey-speed demo (the drone moves slowly),
+so this is an optimisation, not a blocker.
+
+
 ---
 
 ## 6. Gotchas already solved (don't re-discover)
@@ -145,6 +177,8 @@ were lost chasing this. **A loud warning is not automatically the cause.**
 - Do **not** pipe PX4 through `| tee` — it makes the pxh console non-interactive (launcher uses tmux `pipe-pane` for logging instead).
 - Arming from ROS 2 without a GCS: set `NAV_DLL_ACT=0` and `CBRK_SUPPLY_CHK=894281` (or just run QGC, which satisfies the GCS check).
 - Gazebo must render on the RTX (`prime-run`) or it's unusably slow.
+- Ultralytics >=8.4: passing `half=` to `predict()` warns **once per frame** and floods
+  the log. Cast the model to fp16 once at load (`model.model.half()`) instead.
 - **gz-transport: "topic listed but no data" ⇒ `GZ_IP` mismatch, NOT rendering.**
   PX4 runs the gz server with `GZ_IP=127.0.0.1`; every external subscriber
   (`gz topic`, `ros_gz_bridge`, custom nodes) must set it too.
@@ -165,7 +199,8 @@ were lost chasing this. **A loud warning is not automatically the cause.**
 ## 7. Recommended next steps
 
 1. **Get a first real detection** — insert a COCO-class model (person/vehicle) into the Gazebo world under the survey area, fly a survey, and confirm a box in `rqt_image_view`, a `HAZARD #n` log line, and a row in `~/maps/hazard_points.csv`. That closes the M3/M5 loop.
-2. **Speed up** — camera to 640×480 @ 10 Hz for a smoother demo.
+2. **Speed up (see 5.1)** — camera to 640×480 @ 10 Hz; GPU inference is already done
+   and confirmed *not* to be the bottleneck.
 3. **Train landmine weights** — build a small dataset, train YOLO, drop `best.pt` into the detector.
 4. **Scale to swarm (2–5)** — extend the launcher to spawn namespaced PX4 instances (`/px4_1`, `/px4_2`, …) and split a drawn area across drones.
 5. **Hardware track (Track B)** — 50% of the grade is self-designed/Make parts + a DFM + FEA/CFD design report; run this in parallel (see `PHASE1_ROADMAP.md`).
