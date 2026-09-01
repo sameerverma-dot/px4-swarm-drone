@@ -17,6 +17,10 @@ def generate_launch_description():
         'return_tol': '3.0',
         'arm_timeout_s': '30.0',
         'return_timeout_s': '180.0',
+        # Ground-speed cap via setpoint lookahead (~0.95 * this, in m/s).
+        # 4.0 m/s keeps successive camera frames ~1 m apart at 5 FPS.
+        # Set 0.0 to fly flat-out at MPC_XY_VEL_MAX as before.
+        'lookahead_m': '4.0',
     }
     bool_defaults = {
         'rtl_on_complete': 'true',
@@ -24,6 +28,8 @@ def generate_launch_description():
     }
     str_defaults = {
         'csv_dir': '~/maps',
+        # Bool topic telling the detector when frames are worth geotagging.
+        'detect_topic': '/survey/detecting',
     }
 
     decls = [DeclareLaunchArgument(k, default_value=v)

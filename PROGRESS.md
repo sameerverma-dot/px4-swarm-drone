@@ -1,7 +1,7 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 31 Aug 2026 (GPU inference verified; ~2 Hz bottleneck traced upstream)._
+_Last updated: 1 Sep 2026 (full mission verified end-to-end; geotag calibrated)._
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -11,9 +11,18 @@ _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 The **software / autonomy / AI pipeline is built and working end-to-end.**
 A single drone autonomously surveys a specified area and returns, via two
 independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
-The **AI detection pipeline is live**: the downward camera streams into ROS 2,
-YOLO runs on the feed, and annotated frames publish at ~2 Hz. What remains for
-the detection deliverable is a *detectable target* — the plumbing is done.
+The **AI detection pipeline is live and closed the loop**: on 1 Sep a single
+`ros2 launch survey mission.launch.py` flew all 11 waypoints, detected a `person`
+model placed at PX4 `N=10, E=15`, geotagged it, and returned home —
+`VERIFY PASS | waypoints 11/11 (OK) | returned=True`, 2585 track samples.
+
+Geolocation is calibrated: cross-track error was **under 0.5 m**. The remaining
+along-track error was traced to frame latency at 9.2 m/s ground speed, now fixed
+by pose time-matching (`pose_lag_s`) and a speed cap (`lookahead_m`).
+
+The real remaining gap is the **model**, not the pipeline: COCO `yolov8n` invents
+`airplane`/`kite`/`bird` on featureless nadir ground. Landmine weights trained on
+aerial imagery are the next substantive step.
 
 | Capability | Status |
 |---|---|
@@ -27,7 +36,8 @@ the detection deliverable is a *detectable target* — the plumbing is done.
 | YOLO detector node (`perception`) | ✅ **Working on GPU** (cuda:0, RTX 4060, fp16, imgsz 640) |
 | Pipeline throughput | ⚠️ ~2 Hz — bottleneck is upstream of YOLO (see 5.1) |
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
-| Geotagged hazard map / CSV | ⚙️ Running; needs a detectable target in the world |
+| Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
+| Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
 | Multi-drone swarm (2–5) | ⬜ Not started |
 
 ---
@@ -189,7 +199,16 @@ so this is an optimisation, not a blocker.
 - Mission mode refusing to start ("No manual control input"): set `COM_RC_IN_MODE 4`
   (plus `COM_RCL_EXCEPT 7`, `NAV_RCL_ACT 0`); the launcher now sets these automatically.
 - PX4 `/fmu/*` topics are **best-effort QoS** — `ros2 topic echo` needs `--qos-reliability best_effort`.
-- Correct ROS 2 topic names for this PX4 are **unversioned** (`/fmu/out/vehicle_local_position`, etc.).
+- **WRONG EARLIER, NOW CORRECTED:** this PX4 publishes on the **versioned** topics
+  (`/fmu/out/vehicle_local_position_v1`, `/fmu/out/vehicle_status_v4`). The unversioned
+  names carry nothing, which silently caused every arm/offboard timeout and every
+  0-sample track CSV. `ros2 topic list` showing a name proves nothing — a *subscriber*
+  creates that entry too. Use `ros2 topic hz <name>` to find the live one. Both nodes
+  now subscribe to versioned and unversioned names.
+- COCO `yolov8n` hallucinates `airplane`/`kite`/`bird` on empty nadir ground at up to
+  0.85 confidence. `mission.launch.py` now defaults to `classes:='person' conf:=0.40`.
+- Geotag error is dominated by **frame latency × ground speed**, not by axis mapping.
+  Fixed with a pose ring buffer (`pose_lag_s`) + a speed cap (`lookahead_m`).
 - `pip install --user ultralytics` bumps setuptools to 84 and **breaks colcon** (needs <80). Fix: `pip install --user "setuptools==70.3.0"`.
 - QGC v5.0 won't run on Ubuntu 22.04 (glibc). Use v4.4.3.
 - Committing files over the device bridge resets the executable bit — re-`chmod +x` the launcher, or run it with `bash`.

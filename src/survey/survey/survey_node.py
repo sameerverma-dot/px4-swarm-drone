@@ -37,6 +37,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
+from std_msgs.msg import Bool
+
 from px4_msgs.msg import (
     OffboardControlMode,
     TrajectorySetpoint,
@@ -73,6 +75,16 @@ class SurveyNode(Node):
         self.declare_parameter('csv_dir', '~/maps')
         self.declare_parameter('arm_timeout_s', 30.0)
         self.declare_parameter('return_timeout_s', 180.0)
+        # Carrot-chasing lookahead. A bare position setpoint at the far end of a
+        # lane makes PX4 sprint at MPC_XY_VEL_MAX - the first camera run flew the
+        # lanes at ~9.3 m/s, which at ~5 FPS is ~2 m of blur+latency per frame and
+        # wrecks geotag accuracy. Feeding the setpoint forward a fixed distance
+        # instead caps ground speed at roughly MPC_XY_P * lookahead (~0.95 * L).
+        # Set 0.0 to restore the old fly-flat-out behaviour.
+        self.declare_parameter('lookahead_m', 4.0)
+        # Topic the detector listens on so it only geotags during actual survey
+        # lanes - not during climb, RTL or landing.
+        self.declare_parameter('detect_topic', '/survey/detecting')
 
         g = self.get_parameter
         self.x_min = float(g('x_min').value)
@@ -88,6 +100,8 @@ class SurveyNode(Node):
         self.csv_dir = os.path.expanduser(str(g('csv_dir').value))
         self.arm_timeout_s = float(g('arm_timeout_s').value)
         self.return_timeout_s = float(g('return_timeout_s').value)
+        self.lookahead = float(g('lookahead_m').value)
+        self.detect_topic = str(g('detect_topic').value)
 
         self.z = -abs(self.altitude)  # NED down: negative = up
 
@@ -107,11 +121,23 @@ class SurveyNode(Node):
         self.pub_cmd = self.create_publisher(
             VehicleCommand, '/fmu/in/vehicle_command', qos)
 
+        # Detection gate for the perception node. TRANSIENT_LOCAL so a detector
+        # that starts late still gets the current value instead of guessing.
+        gate_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST, depth=1)
+        self.pub_detect = self.create_publisher(Bool, self.detect_topic, gate_qos)
+
         # ---- subscribers ----
-        self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.on_pos, qos)
-        self.create_subscription(
-            VehicleStatus, '/fmu/out/vehicle_status', self.on_status, qos)
+        # PX4 message versioning: messages with MESSAGE_VERSION > 0 are published
+        # on a topic with a _vN suffix (VehicleLocalPosition -> _v1,
+        # VehicleStatus -> _v4). Older/other builds use the unversioned name.
+        # Subscribe to BOTH so this works on either, whichever actually publishes.
+        for t in ('/fmu/out/vehicle_local_position', '/fmu/out/vehicle_local_position_v1'):
+            self.create_subscription(VehicleLocalPosition, t, self.on_pos, qos)
+        for t in ('/fmu/out/vehicle_status', '/fmu/out/vehicle_status_v4'):
+            self.create_subscription(VehicleStatus, t, self.on_status, qos)
 
         # ---- state ----
         self.pos = VehicleLocalPosition()
@@ -127,11 +153,14 @@ class SurveyNode(Node):
         self.t0 = self.now_s()
         self.phase_t0 = self.t0
         self.returned = False
+        self.detecting = None            # last value published on detect_topic
 
         self.get_logger().info(
             f"Survey x[{self.x_min},{self.x_max}] y[{self.y_min},{self.y_max}] "
             f"alt={self.altitude}m lane={self.lane_spacing}m -> {len(self.wp)} waypoints; "
-            f"RTL={'on' if self.rtl_on_complete else 'off'}, verify={self.verify}")
+            f"RTL={'on' if self.rtl_on_complete else 'off'}, verify={self.verify}, "
+            f"lookahead={self.lookahead}m")
+        self.publish_detecting(False)
 
         self.timer = self.create_timer(0.1, self.tick)  # 10 Hz
 
@@ -200,6 +229,32 @@ class SurveyNode(Node):
         m.yaw = float(yaw)
         m.timestamp = self.us()
         self.pub_sp.publish(m)
+
+    def send_sp_limited(self, x, y, z, yaw=0.0):
+        """Position setpoint with a speed cap.
+
+        Instead of handing PX4 the far end of the lane (which it flies at
+        MPC_XY_VEL_MAX), place the setpoint `lookahead_m` ahead of where we
+        actually are. PX4's position controller then commands roughly
+        MPC_XY_P * lookahead m/s. Altitude is always the true target so the climb
+        is unaffected. lookahead_m <= 0 restores the direct behaviour.
+        """
+        if self.lookahead > 0.0 and self.pos_valid:
+            dx, dy = x - self.pos.x, y - self.pos.y
+            d = math.hypot(dx, dy)
+            if d > self.lookahead:
+                x = self.pos.x + dx / d * self.lookahead
+                y = self.pos.y + dy / d * self.lookahead
+        self.send_sp(x, y, z, yaw)
+
+    def publish_detecting(self, on):
+        """Tell the detector whether frames right now are worth geotagging."""
+        on = bool(on)
+        if on == self.detecting:
+            return
+        self.detecting = on
+        self.pub_detect.publish(Bool(data=on))
+        self.get_logger().info(f"detection gate -> {'OPEN' if on else 'closed'}")
 
     def send_cmd(self, command, **p):
         m = VehicleCommand()
@@ -271,7 +326,11 @@ class SurveyNode(Node):
 
         if self.phase == Phase.SURVEY:
             tx, ty, tz = self.wp[self.wp_idx]
-            self.send_sp(tx, ty, tz)
+            self.send_sp_limited(tx, ty, tz)
+            # wp[0] is the climb straight up at home - nothing under us to map,
+            # and the projection is garbage while altitude is still changing.
+            self.publish_detecting(self.wp_idx >= 1 and self.pos_valid
+                                   and -self.pos.z >= 0.8 * self.altitude)
             if self.pos_valid:
                 d = self.dist_to(tx, ty, tz)
                 self.wp_min_dist[self.wp_idx] = min(self.wp_min_dist[self.wp_idx], d)
@@ -282,6 +341,9 @@ class SurveyNode(Node):
                     self.wp_idx += 1
                     if self.wp_idx >= len(self.wp):
                         self.get_logger().info("survey pattern complete")
+                        # Close the gate BEFORE RTL: the climb to RTL altitude was
+                        # what produced the alt-29.7 m junk in hazard_points.csv.
+                        self.publish_detecting(False)
                         if self.rtl_on_complete:
                             self.engage_rtl()
                             self.last_engage_t = self.now_s()
@@ -335,6 +397,7 @@ class SurveyNode(Node):
         if self.phase == Phase.DONE:
             return
         self.phase = Phase.DONE
+        self.publish_detecting(False)
         csv_path = self.write_csv() if self.verify else None
         hit = sum(1 for d in self.wp_min_dist if d <= self.reach_tol)
         for i, (wp, d) in enumerate(zip(self.wp, self.wp_min_dist)):

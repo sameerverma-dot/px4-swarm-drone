@@ -5,3 +5,13 @@ __pycache__/
 *.pyc
 src/px4_msgs/
 src/px4_ros_com/
+
+# Ultralytics auto-downloads this (6.5 MB) on first run - no need to version it.
+# Trained weights you DO want to keep can be force-added: git add -f best.pt
+yolov8n.pt
+
+# Never let credentials near the repo.
+.git-credentials
+.env
+*.pem
+*.key

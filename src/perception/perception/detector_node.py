@@ -17,16 +17,38 @@ What it does:
 Requirements (SYSTEM python that runs ROS 2 - not the ~/yolo_test venv):
   pip install --user ultralytics        # also pulls opencv-python + numpy
 
-GEO-LOCATION IS APPROXIMATE (Phase I): assumes a level drone and a perfect
-nadir camera, flat ground at home altitude. Good enough to place hazard markers;
-calibrate the pixel->ground axis mapping against a known target before trusting
-absolute coordinates (see the note at project_to_ground()).
+--------------------------------------------------------------------------
+THREE THINGS THAT MAKE THE MAP TRUSTWORTHY (added after the first full run)
+--------------------------------------------------------------------------
+1. POSE TIME-MATCHING. The old code geotagged with the *latest* pose, but a
+   frame is already 0.2-0.5 s old by the time YOLO finishes with it. At the
+   ~9 m/s the drone was flying, that is a 2-5 m along-track error - which is
+   exactly what the first flight showed (East was accurate to 0.4 m, North was
+   off by +-3 m with the sign flipping run to run: the classic signature of
+   latency, not of a wrong axis). We now keep a short ring buffer of poses and
+   look up the pose at (frame arrival time - pose_lag_s).
+
+2. DETECTION GATE. survey_node publishes std_msgs/Bool on /survey/detecting,
+   True only while it is actually flying survey lanes. With require_gate:=true
+   the detector ignores frames during climb, RTL and landing - which is where
+   all those alt=29.7 m "hazards" came from. Gated-off frames skip inference
+   entirely, so they cost nothing.
+
+3. CLASS FILTER AT THE MODEL. `classes` is now pushed into YOLO itself, so
+   airplane/kite/bird are never drawn and never scored. COCO weights
+   hallucinate confidently on featureless nadir ground; until real landmine
+   weights exist, restrict to what you actually placed in the world.
+
+GEO-LOCATION IS STILL APPROXIMATE (Phase I): assumes a level drone, a perfect
+nadir camera, and flat ground at home altitude.
 """
 
+import bisect
 import csv
 import math
 import os
 import time
+from collections import deque
 
 import numpy as np
 
@@ -35,6 +57,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
+from std_msgs.msg import Bool
 from px4_msgs.msg import VehicleLocalPosition
 
 try:
@@ -64,6 +87,17 @@ class DetectorNode(Node):
         self.declare_parameter('device', '')                # '' = auto (cuda if available), else 'cuda:0'/'cpu'
         self.declare_parameter('imgsz', 640)                # inference size; smaller = much faster
         self.declare_parameter('half', True)                # fp16 on GPU (ignored on CPU)
+        # --- geolocation quality ---
+        self.declare_parameter('pose_lag_s', 0.15)          # camera+bridge latency to compensate
+        self.declare_parameter('min_alt_m', 1.0)            # below this, geometry is meaningless
+        self.declare_parameter('max_alt_m', 40.0)           # above this, footprint is huge & useless
+        # --- gating (see docstring point 2) ---
+        self.declare_parameter('gate_topic', '/survey/detecting')
+        self.declare_parameter('require_gate', False)       # True = no gate msg -> no detection
+        # --- geotag axis calibration (leave all False unless a known target proves otherwise) ---
+        self.declare_parameter('geo_swap_axes', False)
+        self.declare_parameter('geo_flip_forward', False)
+        self.declare_parameter('geo_flip_right', False)
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -76,6 +110,13 @@ class DetectorNode(Node):
         self.min_sep = float(gp('min_sep_m').value)
         self.imgsz = int(gp('imgsz').value)
         self.half_req = bool(gp('half').value)
+        self.pose_lag = float(gp('pose_lag_s').value)
+        self.min_alt = float(gp('min_alt_m').value)
+        self.max_alt = float(gp('max_alt_m').value)
+        self.require_gate = bool(gp('require_gate').value)
+        self.geo_swap = bool(gp('geo_swap_axes').value)
+        self.geo_flip_f = bool(gp('geo_flip_forward').value)
+        self.geo_flip_r = bool(gp('geo_flip_right').value)
         keep = str(gp('classes').value).strip()
         self.keep = set(s.strip() for s in keep.split(',') if s.strip()) if keep else None
 
@@ -113,19 +154,51 @@ class DetectorNode(Node):
         self.get_logger().info(
             f"inference device={self.device} imgsz={self.imgsz} fp16={self.half}")
 
-        # camera / pose state
-        self.pos = VehicleLocalPosition()
-        self.pos_valid = False
+        # Resolve the class-name filter to model class IDs so the filtering happens
+        # INSIDE YOLO: unwanted classes are never drawn and never scored.
+        self.keep_ids = None
+        names = getattr(self.model, 'names', {}) or {}
+        if self.keep:
+            self.keep_ids = [i for i, n in names.items() if n in self.keep]
+            unknown = self.keep - {names[i] for i in self.keep_ids}
+            if unknown:
+                self.get_logger().warn(
+                    f"classes not in this model, ignored: {sorted(unknown)}")
+            if not self.keep_ids:
+                self.get_logger().error(
+                    "none of the requested classes exist in the model -> "
+                    "nothing will ever be detected. Check the 'classes' parameter.")
+            else:
+                self.get_logger().info(
+                    f"class filter active: {sorted(self.keep)} -> ids {self.keep_ids}")
+
+        # ---- pose ring buffer (time-matched geolocation, docstring point 1) ----
+        # Wall-clock keyed; entries are (t, x, y, z, heading). ~10 s at 50 Hz.
+        self.pose_t = deque(maxlen=600)
+        self.pose_v = deque(maxlen=600)
         self.hazards = []   # list of (north, east) already recorded
+
+        # ---- detection gate (docstring point 2) ----
+        self.gate = not self.require_gate
+        self.gate_seen = False
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST, depth=1)
+        gate_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST, depth=1)
 
         self.create_subscription(Image, self.image_topic, self.on_image, qos_profile_sensor_data)
-        self.create_subscription(
-            VehicleLocalPosition, '/fmu/out/vehicle_local_position', self.on_pos, px4_qos)
+        # PX4 publishes VehicleLocalPosition on the versioned topic
+        # (/fmu/out/vehicle_local_position_v1) on this build; other builds use the
+        # unversioned name. Subscribe to both. Without this the pose buffer stays
+        # empty forever and NO detection can ever be geotagged.
+        for t in ('/fmu/out/vehicle_local_position', '/fmu/out/vehicle_local_position_v1'):
+            self.create_subscription(VehicleLocalPosition, t, self.on_pos, px4_qos)
+        self.create_subscription(Bool, str(gp('gate_topic').value), self.on_gate, gate_qos)
 
         self.pub_annot = self.create_publisher(Image, self.annotated_topic, 1)
 
@@ -139,14 +212,45 @@ class DetectorNode(Node):
         self.get_logger().info(
             f"detector up: image='{self.image_topic}' -> annotated='{self.annotated_topic}', "
             f"hazards -> {self.hazard_csv}")
+        self.get_logger().info(
+            f"gate='{gp('gate_topic').value}' require_gate={self.require_gate} "
+            f"| pose_lag={self.pose_lag}s | alt window [{self.min_alt}, {self.max_alt}] m")
 
     # ---------- callbacks ----------
     def on_pos(self, msg):
-        self.pos = msg
-        self.pos_valid = bool(msg.xy_valid and msg.z_valid)
+        if not (msg.xy_valid and msg.z_valid):
+            return
+        self.pose_t.append(time.time())
+        self.pose_v.append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
+
+    def on_gate(self, msg):
+        new = bool(msg.data)
+        if new != self.gate or not self.gate_seen:
+            self.get_logger().info(f"detection gate -> {'OPEN' if new else 'closed'}")
+        self.gate = new
+        self.gate_seen = True
+
+    def pose_at(self, t):
+        """Nearest buffered pose to wall-clock time t. None if the buffer is empty
+        or the closest sample is more than 0.5 s away (stale/no telemetry)."""
+        if not self.pose_t:
+            return None
+        ts = self.pose_t
+        i = bisect.bisect_left(ts, t)
+        cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
+        j = min(cand, key=lambda k: abs(ts[k] - t))
+        if abs(ts[j] - t) > 0.5:
+            return None
+        return self.pose_v[j]
 
     def img_to_np(self, msg):
-        """sensor_msgs/Image -> HxWx3 BGR numpy (handles rgb8/bgr8)."""
+        """sensor_msgs/Image -> HxWx3 BGR numpy (handles rgb8/bgr8).
+
+        np.frombuffer() is READ-ONLY. cv2.rectangle/putText write in place and
+        raise on a read-only array, so force a writable copy. (The rgb8 path used
+        to get one for free via the channel flip; bgr8 did not - that was a latent
+        crash in test_perception.py.)
+        """
         arr = np.frombuffer(msg.data, dtype=np.uint8)
         try:
             arr = arr.reshape((msg.height, msg.width, 3))
@@ -154,7 +258,7 @@ class DetectorNode(Node):
             return None
         if msg.encoding == 'rgb8':
             arr = arr[:, :, ::-1]  # RGB -> BGR
-        return np.ascontiguousarray(arr)
+        return np.ascontiguousarray(arr).copy()
 
     def np_to_img(self, frame, header):
         m = Image()
@@ -166,30 +270,36 @@ class DetectorNode(Node):
         m.data = frame.tobytes()
         return m
 
-    def project_to_ground(self, u, v, img_w, img_h):
+    def project_to_ground(self, u, v, img_w, img_h, pose):
         """
-        Approx nadir projection: pixel (u,v) -> (north, east) in local NED.
-        Assumes level flight, camera looking straight down, flat ground.
-        NOTE: the forward/right axis mapping below is an assumption about the
-        image orientation - verify against a known target and flip signs if the
-        recorded points are mirrored/rotated.
+        Approx nadir projection: pixel (u,v) -> (north, east) in local NED, using
+        the pose the frame was actually taken at (not the latest one).
+
+        The three geo_* flags exist so a mirrored/rotated result can be corrected
+        without editing code. As of the calibration flight they should all stay
+        False: with a target at N=10 E=15, the recorded East was 14.5-14.7 (good)
+        and the North error was symmetric about the truth - latency, not axes.
         """
-        if not self.pos_valid:
+        x, y, z, yaw = pose
+        h = -z                          # altitude above home (m); z is down
+        if h < self.min_alt or h > self.max_alt:
             return None
-        h = -float(self.pos.z)          # altitude above home (m), z is down
-        if h < 1.0:
-            return None                 # too low / on ground
         mpp = (2.0 * h * math.tan(self.hfov / 2.0)) / img_w   # metres per pixel
         du = (u - img_w / 2.0)          # +right in image
         dv = (v - img_h / 2.0)          # +down in image
-        fwd = -dv * mpp                 # image up  -> forward (assumption)
-        right = du * mpp                # image right-> right   (assumption)
-        yaw = float(self.pos.heading)   # rad, NED
-        north = self.pos.x + fwd * math.cos(yaw) - right * math.sin(yaw)
-        east = self.pos.y + fwd * math.sin(yaw) + right * math.cos(yaw)
+        fwd = -dv * mpp                 # image up   -> forward
+        right = du * mpp                # image right-> right
+        if self.geo_swap:
+            fwd, right = right, fwd
+        if self.geo_flip_f:
+            fwd = -fwd
+        if self.geo_flip_r:
+            right = -right
+        north = x + fwd * math.cos(yaw) - right * math.sin(yaw)
+        east = y + fwd * math.sin(yaw) + right * math.cos(yaw)
         return north, east
 
-    def record_hazard(self, north, east, cls, conf):
+    def record_hazard(self, north, east, cls, conf, alt):
         for (hn, he) in self.hazards:
             if math.hypot(north - hn, east - he) < self.min_sep:
                 return False            # already have one here
@@ -197,13 +307,22 @@ class DetectorNode(Node):
         with open(self.hazard_csv, 'a', newline='') as f:
             csv.writer(f).writerow(
                 [f"{time.time():.1f}", f"{north:.2f}", f"{east:.2f}",
-                 cls, f"{conf:.2f}", f"{-self.pos.z:.1f}"])
+                 cls, f"{conf:.2f}", f"{alt:.1f}"])
         self.get_logger().info(
             f"HAZARD #{len(self.hazards)}: {cls} conf={conf:.2f} at "
-            f"N={north:.1f} E={east:.1f} (alt {-self.pos.z:.1f}m)")
+            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m)")
         return True
 
     def on_image(self, msg):
+        # Timestamp FIRST: everything after this (decode, inference) is latency we
+        # must not attribute to the drone's position.
+        t_rx = time.time()
+
+        # Gated off (climb / RTL / landing / no survey running): skip inference
+        # entirely. Costs nothing and keeps the hazard map free of junk.
+        if not self.gate:
+            return
+
         frame = self.img_to_np(msg)
         if frame is None:
             return
@@ -217,18 +336,23 @@ class DetectorNode(Node):
                     f"{50.0 / max(now - prev, 1e-6):.1f} FPS through detector "
                     f"(device={self.device})")
         # NOTE: 'half' is deprecated in ultralytics >=8.4 (warns once per frame and
-        # floods the log). Weights are already moved to fp16 on GPU below at load
-        # time, so we simply don't pass it here.
+        # floods the log). Weights are already moved to fp16 on GPU at load time,
+        # so we simply don't pass it here.
         results = self.model(frame, conf=self.conf, imgsz=self.imgsz,
-                             device=self.device, verbose=False)
+                             device=self.device, classes=self.keep_ids,
+                             verbose=False)
         r = results[0]
         img_h, img_w = frame.shape[:2]
+
+        pose = self.pose_at(t_rx - self.pose_lag)
+        if pose is None and len(r.boxes) and self.frame_count % 50 == 0:
+            self.get_logger().warn(
+                "detections but no pose within 0.5 s of the frame - "
+                "is PX4 telemetry flowing? (geotagging skipped)")
 
         for box in r.boxes:
             cls_id = int(box.cls[0])
             name = self.model.names.get(cls_id, str(cls_id)) if hasattr(self.model, 'names') else str(cls_id)
-            if self.keep is not None and name not in self.keep:
-                continue
             conf = float(box.conf[0])
             x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
             u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
@@ -238,9 +362,11 @@ class DetectorNode(Node):
                 cv2.putText(frame, f"{name} {conf:.2f}", (x1, max(0, y1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
-            g = self.project_to_ground(u, v, img_w, img_h)
+            if pose is None:
+                continue
+            g = self.project_to_ground(u, v, img_w, img_h, pose)
             if g is not None:
-                self.record_hazard(g[0], g[1], name, conf)
+                self.record_hazard(g[0], g[1], name, conf, -pose[2])
 
         if self.publish_annotated:
             self.pub_annot.publish(self.np_to_img(frame, msg.header))

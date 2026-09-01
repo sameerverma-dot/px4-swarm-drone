@@ -21,8 +21,22 @@ def generate_launch_description():
         DeclareLaunchArgument('cam_gz_topic', default_value=CAM_TOPIC),
         DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
         DeclareLaunchArgument('conf', default_value='0.25'),
+        # Comma-separated class NAMES to keep, e.g. 'person'. Empty = keep all.
+        # COCO weights hallucinate airplane/kite/bird on featureless nadir
+        # ground, so restrict this whenever you know what you placed.
         DeclareLaunchArgument('classes', default_value=''),
         DeclareLaunchArgument('gz_ip', default_value='127.0.0.1'),
+        # --- geolocation quality ---
+        DeclareLaunchArgument(
+            'pose_lag_s', default_value='0.15',
+            description='camera+bridge latency compensated when looking up the pose'),
+        DeclareLaunchArgument('min_alt_m', default_value='1.0'),
+        DeclareLaunchArgument('max_alt_m', default_value='40.0'),
+        # --- gating ---
+        DeclareLaunchArgument('gate_topic', default_value='/survey/detecting'),
+        DeclareLaunchArgument(
+            'require_gate', default_value='false',
+            description='true = geotag ONLY while survey_node says it is flying lanes'),
     ]
 
     cam = LaunchConfiguration('cam_gz_topic')
@@ -48,6 +62,11 @@ def generate_launch_description():
             'weights': ParameterValue(LaunchConfiguration('weights'), value_type=str),
             'conf': ParameterValue(LaunchConfiguration('conf'), value_type=float),
             'classes': ParameterValue(LaunchConfiguration('classes'), value_type=str),
+            'pose_lag_s': ParameterValue(LaunchConfiguration('pose_lag_s'), value_type=float),
+            'min_alt_m': ParameterValue(LaunchConfiguration('min_alt_m'), value_type=float),
+            'max_alt_m': ParameterValue(LaunchConfiguration('max_alt_m'), value_type=float),
+            'gate_topic': ParameterValue(LaunchConfiguration('gate_topic'), value_type=str),
+            'require_gate': ParameterValue(LaunchConfiguration('require_gate'), value_type=bool),
         }],
         additional_env=GZ_ENV,
     )
