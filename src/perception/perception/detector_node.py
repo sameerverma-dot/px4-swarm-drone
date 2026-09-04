@@ -32,7 +32,8 @@ THREE THINGS THAT MAKE THE MAP TRUSTWORTHY (added after the first full run)
    True only while it is actually flying survey lanes. With require_gate:=true
    the detector ignores frames during climb, RTL and landing - which is where
    all those alt=29.7 m "hazards" came from. Gated-off frames skip inference
-   entirely, so they cost nothing.
+   (the expensive part) but still republish the raw frame, so the rqt video
+   feed stays live instead of looking crashed.
 
 3. CLASS FILTER AT THE MODEL. `classes` is now pushed into YOLO itself, so
    airplane/kite/bird are never drawn and never scored. COCO weights
@@ -88,7 +89,7 @@ class DetectorNode(Node):
         self.declare_parameter('imgsz', 640)                # inference size; smaller = much faster
         self.declare_parameter('half', True)                # fp16 on GPU (ignored on CPU)
         # --- geolocation quality ---
-        self.declare_parameter('pose_lag_s', 0.15)          # camera+bridge latency to compensate
+        self.declare_parameter('pose_lag_s', 0.25)          # camera+bridge latency to compensate
         self.declare_parameter('min_alt_m', 1.0)            # below this, geometry is meaningless
         self.declare_parameter('max_alt_m', 40.0)           # above this, footprint is huge & useless
         # --- gating (see docstring point 2) ---
@@ -165,9 +166,14 @@ class DetectorNode(Node):
                 self.get_logger().warn(
                     f"classes not in this model, ignored: {sorted(unknown)}")
             if not self.keep_ids:
+                # An empty list would be handed to ultralytics as `classes=[]`,
+                # whose behaviour is not worth relying on. Fall back to None
+                # (= keep all) and let the name filter below reject everything,
+                # so the failure is loud and predictable rather than silent.
+                self.keep_ids = None
                 self.get_logger().error(
                     "none of the requested classes exist in the model -> "
-                    "nothing will ever be detected. Check the 'classes' parameter.")
+                    "nothing will be recorded. Check the 'classes' parameter.")
             else:
                 self.get_logger().info(
                     f"class filter active: {sorted(self.keep)} -> ids {self.keep_ids}")
@@ -318,13 +324,16 @@ class DetectorNode(Node):
         # must not attribute to the drone's position.
         t_rx = time.time()
 
-        # Gated off (climb / RTL / landing / no survey running): skip inference
-        # entirely. Costs nothing and keeps the hazard map free of junk.
-        if not self.gate:
-            return
-
         frame = self.img_to_np(msg)
         if frame is None:
+            return
+
+        # Gated off (climb / RTL / landing / no survey running): skip INFERENCE,
+        # which is the expensive part, but keep republishing the raw frame so
+        # rqt_image_view stays live. A frozen video feed looks like a crash.
+        if not self.gate:
+            if self.publish_annotated:
+                self.pub_annot.publish(self.np_to_img(frame, msg.header))
             return
         self.frame_count += 1
         if self.frame_count % 50 == 0:
@@ -353,6 +362,11 @@ class DetectorNode(Node):
         for box in r.boxes:
             cls_id = int(box.cls[0])
             name = self.model.names.get(cls_id, str(cls_id)) if hasattr(self.model, 'names') else str(cls_id)
+            # Backstop for the model-level `classes` filter: covers the case
+            # where a requested name did not resolve to an id, and any model
+            # whose names dict disagrees with its output ids.
+            if self.keep is not None and name not in self.keep:
+                continue
             conf = float(box.conf[0])
             x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
             u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0

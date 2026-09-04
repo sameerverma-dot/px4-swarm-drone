@@ -28,7 +28,7 @@ def generate_launch_description():
         DeclareLaunchArgument('gz_ip', default_value='127.0.0.1'),
         # --- geolocation quality ---
         DeclareLaunchArgument(
-            'pose_lag_s', default_value='0.15',
+            'pose_lag_s', default_value='0.25',
             description='camera+bridge latency compensated when looking up the pose'),
         DeclareLaunchArgument('min_alt_m', default_value='1.0'),
         DeclareLaunchArgument('max_alt_m', default_value='40.0'),

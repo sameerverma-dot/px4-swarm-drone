@@ -31,13 +31,26 @@ The first three are tmux panes; QGC opens in its own window.
 ### ALWAYS do this before flying
 
 ```bash
-ros2 topic hz /fmu/out/vehicle_local_position_v1
+bash ~/px4_ros_ws/check_system.sh
 ```
 
-It must report a rate. If it doesn't, telemetry is dead and every mission will
+Probes six layers — environment, processes, telemetry, camera, inference,
+outputs — and prints PASS/FAIL for each, so a failure names *which* layer broke.
+Fix the first FAIL; later layers depend on earlier ones. `--quick` skips the
+live-topic probes.
+
+By hand, the one check that matters most:
+
+```bash
+ros2 topic echo /fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once
+```
+
+It must print a message. If it doesn't, telemetry is dead and every mission will
 silently fail with `arm/offboard timeout` and `0 samples` — this exact check
-would have saved an entire session. See `SYSTEM_GUIDE.md` §3.5 on why the topic
-name carries a `_v1`.
+would have saved an entire session. The `--qos-reliability best_effort` is not
+optional: `/fmu/out/*` is best-effort, and a default RELIABLE subscriber matches
+nothing and reports silence even when data is flowing. See `SYSTEM_GUIDE.md`
+§3.5 on why the topic name carries a `_v1`.
 
 ---
 
@@ -48,8 +61,11 @@ cd ~/px4_ros_ws
 colcon build --packages-select survey perception && source install/setup.bash
 
 ros2 launch survey mission.launch.py \
-    x_max:=30.0 y_max:=20.0 altitude:=5.0 lane_spacing:=5.0
+    x_max:=30.0 y_max:=20.0 altitude:=5.0
 ```
+
+`lane_spacing` is no longer passed — it derives itself from the camera footprint
+at the altitude you chose (see the argument table below).
 
 This runs the whole Phase I loop: camera bridge + YOLO detector start first,
 then after 8 s the survey node arms, flies a boustrophedon pattern, geotags what
@@ -59,6 +75,22 @@ Watch it:
 
 ```bash
 ros2 run rqt_image_view rqt_image_view /detection/image_annotated
+```
+
+### Render the map when it lands
+
+```bash
+ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
+```
+
+Writes `~/maps/hazard_map_<run>.png` and `.geojson` (WGS84 — opens in QGIS,
+Google Earth, geojson.io). `--truth N,E` draws a validation ring at a known
+target and reports the nearest detection to it.
+
+Re-read an OLD run under the current rules, without re-flying:
+
+```bash
+ros2 run perception hazard_map --classes person --min-conf 0.40 --max-alt 6.0
 ```
 
 ### Survey only, no detection
@@ -88,14 +120,15 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 |---|---|---|
 | `x_min/x_max/y_min/y_max` | `0/40/0/30` | Survey rectangle, PX4 local NED metres, home = 0,0 |
 | `altitude` | `15.0` | Metres AGL (the node converts to `z = -altitude`) |
-| `lane_spacing` | `8.0` | Metres between lanes. Camera footprint at height *h* is `2·h·tan(HFOV/2)` — at 5 m that's 11.85 m, so 8.3 m gives 30 % sidelap |
+| `lane_spacing` | `0.0` | **0.0 = derive** from the camera footprint: `2·h·tan(HFOV/2)·(1−sidelap)`. At 5 m that is 8.3 m. A positive value overrides, and warns if it exceeds the footprint (which leaves unphotographed gaps) |
+| `sidelap` | `0.3` | Overlap fraction between adjacent lanes when deriving |
 | `lookahead_m` | `4.0` | **Ground-speed cap** (~0.95 × this, m/s). `0.0` = fly flat out at `MPC_XY_VEL_MAX` |
 | `rtl_on_complete` | `true` | `false` leaves the drone hovering at the end |
 | `weights` | `yolov8n.pt` | Point at `~/runs/detect/train/weights/best.pt` once you have trained weights |
 | `classes` | `person` | Comma-separated class names to keep. `''` = keep all — expect `airplane`/`kite`/`bird` junk from COCO weights on nadir ground |
 | `conf` | `0.40` | Detection confidence floor |
 | `require_gate` | `true` | Only geotag while the survey node says it's flying lanes — no hazards logged during climb, RTL or landing |
-| `pose_lag_s` | `0.15` | Camera+bridge latency compensated when geotagging. Raise if along-track error is consistently one-sided |
+| `pose_lag_s` | `0.25` | Camera+bridge latency compensated when geotagging. Replaying the first flight: 3.98 m → 0.96 m RMS combined with the speed cap. Raise toward 0.35 if along-track error is still one-sided |
 | `survey_delay` | `8.0` | Seconds to let the camera pipeline settle before the drone moves |
 
 `geo_swap_axes` / `geo_flip_forward` / `geo_flip_right` exist on the detector but
@@ -113,7 +146,9 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 | **Your** packages | `~/px4_ros_ws/src/survey`, `~/px4_ros_ws/src/perception` |
 | Vendored (not yours) | `~/px4_ros_ws/src/px4_msgs`, `~/px4_ros_ws/src/px4_ros_com` |
 | Launch files | `src/survey/launch/{survey,mission}.launch.py`, `src/perception/launch/perception.launch.py` |
-| **Outputs** | `~/maps/survey_track_<ts>.csv` (flown path), `~/maps/hazard_points.csv` (detections) |
+| Map renderer | `src/perception/perception/hazard_map.py` (`ros2 run perception hazard_map`) |
+| System self-test | `check_system.sh` |
+| **Outputs** | `~/maps/survey_track_<ts>.csv` (flown path), `~/maps/hazard_points.csv` (detections), `~/maps/hazard_map_*.png` / `.geojson` |
 | PX4 firmware / SITL | `~/PX4-Autopilot` |
 | DDS agent | `~/Micro-XRCE-DDS-Agent` |
 | QGroundControl | `~/Downloads/QGroundControl.AppImage` (v4.4.3 — v5 needs a newer Ubuntu) |

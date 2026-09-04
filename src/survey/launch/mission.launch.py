@@ -28,11 +28,15 @@ DEFAULTS THAT CHANGED AFTER THE FIRST FULL CAMERA RUN
   require_gate:=true  no geotagging during climb, RTL or landing. The old run
                       logged "hazards" at 29.7 m on the way home.
   lookahead_m:=4.0    caps ground speed ~3.8 m/s. The first run flew lanes at
-                      9.3 m/s, which is what smeared the North coordinate.
+                      9.2 m/s, which is what smeared the North coordinate.
+                      Replaying that flight's data: 3.98 m RMS along-track
+                      error -> 0.96 m with the cap plus pose_lag 0.25.
+  lane_spacing:=0.0   derived from the camera footprint instead of guessed.
 
 Useful overrides:
     weights:=/home/sam/runs/detect/train/weights/best.pt   # your trained model
     lane_spacing:=8.0  altitude:=15.0  conf:=0.35  classes:=''
+    sidelap:=0.5                                            # denser coverage
     rtl_on_complete:=false                                  # stay airborne at the end
     lookahead_m:=0.0                                        # fly flat-out again
 """
@@ -57,7 +61,10 @@ def generate_launch_description():
         DeclareLaunchArgument('y_min', default_value='0.0'),
         DeclareLaunchArgument('y_max', default_value='30.0'),
         DeclareLaunchArgument('altitude', default_value='15.0'),
-        DeclareLaunchArgument('lane_spacing', default_value='8.0'),
+        DeclareLaunchArgument(
+            'lane_spacing', default_value='0.0',
+            description='0.0 derives it from the camera footprint at this altitude'),
+        DeclareLaunchArgument('sidelap', default_value='0.3'),
         DeclareLaunchArgument('rtl_on_complete', default_value='true'),
         DeclareLaunchArgument(
             'lookahead_m', default_value='4.0',
@@ -66,7 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
         DeclareLaunchArgument('conf', default_value='0.40'),
         DeclareLaunchArgument('classes', default_value='person'),
-        DeclareLaunchArgument('pose_lag_s', default_value='0.15'),
+        DeclareLaunchArgument('pose_lag_s', default_value='0.25'),
         DeclareLaunchArgument('max_alt_m', default_value='40.0'),
         DeclareLaunchArgument('require_gate', default_value='true'),
         # --- timing ---
@@ -100,6 +107,7 @@ def generate_launch_description():
             'y_max': LaunchConfiguration('y_max'),
             'altitude': LaunchConfiguration('altitude'),
             'lane_spacing': LaunchConfiguration('lane_spacing'),
+            'sidelap': LaunchConfiguration('sidelap'),
             'rtl_on_complete': LaunchConfiguration('rtl_on_complete'),
             'lookahead_m': LaunchConfiguration('lookahead_m'),
         }.items(),

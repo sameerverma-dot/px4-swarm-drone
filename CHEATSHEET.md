@@ -27,6 +27,8 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 | Survey-only launch | `src/survey/launch/survey.launch.py` |
 | Perception-only launch | `src/perception/launch/perception.launch.py` |
 | Offline detector test | `src/perception/test_perception.py` |
+| Map renderer | `src/perception/perception/hazard_map.py` |
+| System self-test | `check_system.sh` |
 | Stack launcher | `start_px4_sim.sh` |
 | Camera resolution / frame rate | `~/PX4-Autopilot/Tools/simulation/gz/models/mono_cam/model.sdf` |
 
@@ -43,6 +45,8 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 |---|---|
 | `survey_track_<unix_ts>.csv` | `t_s, x_ned, y_ned, z_ned` — the flown path |
 | `hazard_points.csv` | `t_s, x_ned_north, y_ned_east, class, conf, alt_m` — detections |
+| `hazard_map_<ts>.png` | the rendered map — the actual deliverable |
+| `hazard_map_<ts>.geojson` | same points in WGS84, for QGIS / Google Earth |
 
 `hazard_points.csv` **appends across runs**. Move it aside before a fresh flight
 or you'll be comparing two flights mixed together.
@@ -53,13 +57,16 @@ or you'll be comparing two flights mixed together.
 # 1. boot the sim (normal terminal, NOT inside tmux)
 bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
 
-# 2. sanity check — must report a rate, or nothing will work
-ros2 topic hz /fmu/out/vehicle_local_position_v1
+# 2. what's actually working? PASS/FAIL per layer
+bash ~/px4_ros_ws/check_system.sh
 
 # 3. build + fly
 cd ~/px4_ros_ws
 colcon build --packages-select survey perception && source install/setup.bash
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0 lane_spacing:=5.0
+ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
+
+# 4. render the map
+ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
 ```
 
 Stop everything: `tmux kill-server`

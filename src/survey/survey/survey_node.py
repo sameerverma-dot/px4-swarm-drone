@@ -67,7 +67,12 @@ class SurveyNode(Node):
         self.declare_parameter('y_min', 0.0)
         self.declare_parameter('y_max', 30.0)
         self.declare_parameter('altitude', 10.0)       # metres AGL (positive)
-        self.declare_parameter('lane_spacing', 8.0)    # metres between lanes
+        # lane_spacing <= 0 derives it from the camera footprint (see below),
+        # which is what you actually want for a coverage survey. A positive
+        # value overrides the derivation.
+        self.declare_parameter('lane_spacing', 0.0)    # metres between lanes; 0 = derive
+        self.declare_parameter('sidelap', 0.3)         # fraction of overlap between lanes
+        self.declare_parameter('hfov_rad', 1.74)       # mono_cam SDF; must match the detector
         self.declare_parameter('reach_tol', 1.5)       # waypoint reach tolerance (m)
         self.declare_parameter('return_tol', 3.0)      # home-return tolerance (m)
         self.declare_parameter('rtl_on_complete', True)
@@ -93,6 +98,8 @@ class SurveyNode(Node):
         self.y_max = float(g('y_max').value)
         self.altitude = float(g('altitude').value)
         self.lane_spacing = float(g('lane_spacing').value)
+        self.sidelap = min(max(float(g('sidelap').value), 0.0), 0.9)
+        self.hfov = float(g('hfov_rad').value)
         self.reach_tol = float(g('reach_tol').value)
         self.return_tol = float(g('return_tol').value)
         self.rtl_on_complete = bool(g('rtl_on_complete').value)
@@ -104,6 +111,25 @@ class SurveyNode(Node):
         self.detect_topic = str(g('detect_topic').value)
 
         self.z = -abs(self.altitude)  # NED down: negative = up
+
+        # Derive lane spacing from what the camera can actually see, rather than
+        # guessing. A nadir camera at height h sees a strip 2*h*tan(HFOV/2) wide;
+        # stepping by that much times (1 - sidelap) guarantees the requested
+        # overlap between adjacent lanes. Too wide leaves unphotographed gaps
+        # between lanes - the survey "passes" while missing ground.
+        self.footprint_w = 2.0 * self.altitude * math.tan(self.hfov / 2.0)
+        if self.lane_spacing <= 0.0:
+            self.lane_spacing = max(self.footprint_w * (1.0 - self.sidelap), 0.5)
+            self.get_logger().info(
+                f"lane_spacing derived: footprint {self.footprint_w:.2f} m at "
+                f"{self.altitude:.1f} m altitude, {self.sidelap:.0%} sidelap "
+                f"-> {self.lane_spacing:.2f} m")
+        elif self.lane_spacing > self.footprint_w:
+            self.get_logger().warn(
+                f"lane_spacing {self.lane_spacing:.1f} m EXCEEDS the camera "
+                f"footprint {self.footprint_w:.1f} m at {self.altitude:.1f} m "
+                f"altitude -> unphotographed gaps between lanes. "
+                f"Use lane_spacing:=0.0 to derive it.")
 
         # ---- QoS: matches px4_ros_com examples (proven with this PX4/px4_msgs) ----
         qos = QoSProfile(
@@ -154,6 +180,7 @@ class SurveyNode(Node):
         self.phase_t0 = self.t0
         self.returned = False
         self.detecting = None            # last value published on detect_topic
+        self.reached_alt = False         # latched once we first reach survey altitude
 
         self.get_logger().info(
             f"Survey x[{self.x_min},{self.x_max}] y[{self.y_min},{self.y_max}] "
@@ -329,8 +356,12 @@ class SurveyNode(Node):
             self.send_sp_limited(tx, ty, tz)
             # wp[0] is the climb straight up at home - nothing under us to map,
             # and the projection is garbage while altitude is still changing.
-            self.publish_detecting(self.wp_idx >= 1 and self.pos_valid
-                                   and -self.pos.z >= 0.8 * self.altitude)
+            # reached_alt is LATCHED: without it the gate chatters open/closed
+            # every time the drone dips slightly during a lane turn, spamming
+            # the log and republishing on every tick.
+            if self.pos_valid and -self.pos.z >= 0.8 * self.altitude:
+                self.reached_alt = True
+            self.publish_detecting(self.wp_idx >= 1 and self.reached_alt)
             if self.pos_valid:
                 d = self.dist_to(tx, ty, tz)
                 self.wp_min_dist[self.wp_idx] = min(self.wp_min_dist[self.wp_idx], d)

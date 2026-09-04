@@ -12,15 +12,15 @@ def generate_launch_description():
         'y_min': '0.0',
         'y_max': '30.0',
         'altitude': '10.0',
-        'lane_spacing': '8.0',
+        # 0.0 = derive from the camera footprint at the chosen altitude
+        # (2*h*tan(HFOV/2) * (1 - sidelap)). A positive value overrides it.
+        'lane_spacing': '0.0',
+        'sidelap': '0.3',
+        'hfov_rad': '1.74',
         'reach_tol': '1.5',
         'return_tol': '3.0',
         'arm_timeout_s': '30.0',
         'return_timeout_s': '180.0',
-        # Ground-speed cap via setpoint lookahead (~0.95 * this, in m/s).
-        # 4.0 m/s keeps successive camera frames ~1 m apart at 5 FPS.
-        # Set 0.0 to fly flat-out at MPC_XY_VEL_MAX as before.
-        'lookahead_m': '4.0',
     }
     bool_defaults = {
         'rtl_on_complete': 'true',
@@ -28,8 +28,6 @@ def generate_launch_description():
     }
     str_defaults = {
         'csv_dir': '~/maps',
-        # Bool topic telling the detector when frames are worth geotagging.
-        'detect_topic': '/survey/detecting',
     }
 
     decls = [DeclareLaunchArgument(k, default_value=v)
