@@ -51,25 +51,94 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 `hazard_points.csv` **appends across runs**. Move it aside before a fresh flight
 or you'll be comparing two flights mixed together.
 
-## 4. The three commands you need every time
+## 4. WHERE do I run this? — the logic
+
+You are never just "running a command on the computer". You are **talking to one
+of four things**, and that decides where the command goes.
+
+| You're talking to | How to reach it | Needs |
+|---|---|---|
+| **PX4** (the flight brain) | the `pxh>` pane inside tmux | nothing — you're already inside it |
+| **Gazebo** (the world) | any terminal, `gz ...` | `GZ_IP=127.0.0.1` |
+| **The ROS 2 graph** | any terminal, `ros2 ...` | `source install/setup.bash` |
+| **Plain Linux** | any terminal | nothing |
+
+Three questions get you the right place every time:
+
+**1. Does it keep running, or does it finish?**
+Anything that keeps running *owns that terminal* until you press Ctrl-C. Give it
+its own terminal or tmux pane. Anything that finishes and returns your prompt can
+share a terminal with other one-shot commands.
+
+Keeps running: `start_px4_sim.sh`, `ros2 launch ...`, `rqt_image_view`.
+Finishes: `colcon build`, `check_system.sh`, `add_target.sh`, `hazard_map`, all `git`.
+
+**2. Which process does it need to see?**
+A fresh terminal knows nothing. `ros2` commands can't find your packages until
+you `source install/setup.bash`; `gz` commands see the topic but receive no data
+without `GZ_IP=127.0.0.1`; `commander` and `param set` don't exist outside PX4's
+own shell. Getting a "command not found" or a silent hang is almost always this.
+
+**3. Am I about to paste several lines at once?**
+Don't, if one of them is long-running. The shell runs pasted lines in order, so a
+line that never exits swallows everything after it — and a line *before* it that
+was supposed to start the sim in the background never gets the chance. This is
+exactly how a mission once got launched into a simulator that wasn't running.
+
+### The layout, concretely
+
+```
+Terminal 1  ── bash start_px4_sim.sh gz_x500_mono_cam_down
+               (this becomes the tmux window; leave it alone)
+                 ├── pane: Micro XRCE-DDS agent      (just logs)
+                 ├── pane: PX4 console  pxh>          <- commander / param go HERE
+                 └── pane: ROS 2 shell, pre-sourced   <- ros2 commands can go here
+
+Terminal 2  ── your working terminal. source install/setup.bash once, then:
+               colcon build · check_system.sh · add_target.sh · hazard_map · git
+
+Terminal 3  ── only when you want to watch the camera:
+               ros2 run rqt_image_view rqt_image_view /detection/image_annotated
+```
+
+### Every command in these docs, and where it goes
+
+| Command | Where | Why |
+|---|---|---|
+| `bash start_px4_sim.sh ...` | **Terminal 1, own terminal, NOT inside tmux** | long-running; it *creates* the tmux session, so nesting breaks it |
+| `colcon build ...` | Terminal 2 | finishes; must be in `~/px4_ros_ws` |
+| `source install/setup.bash` | Terminal 2, after every build | teaches that terminal where your packages are |
+| `bash check_system.sh` | Terminal 2 | finishes; read-only |
+| `bash add_target.sh` | Terminal 2, **after** the sim is up | talks to a *running* Gazebo |
+| `ros2 launch survey mission...` | Terminal 2 | long-running — it owns the terminal until the flight ends |
+| `ros2 run perception hazard_map` | Terminal 2, after the flight | reads the CSVs the flight just wrote |
+| `ros2 topic echo/hz ...` | Terminal 2 or the tmux ROS pane | needs ROS sourced |
+| `gz topic -l`, `gz model --list` | anywhere, with `GZ_IP=127.0.0.1` | talks to Gazebo, not ROS |
+| `commander takeoff`, `param set ...` | **the `pxh>` pane only** | these are PX4's own commands |
+| `git ...` | Terminal 2, in `~/px4_ros_ws` | plain Linux |
+| `pip install ...` | anywhere | plain Linux |
+| `tmux kill-server` | anywhere | stops the whole stack |
+
+### The normal sequence
 
 ```bash
-# 1. boot the sim (normal terminal, NOT inside tmux)
+# Terminal 1
 bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
+# wait for QGC to show the drone connected
 
-# 2. what's actually working? PASS/FAIL per layer
-bash ~/px4_ros_ws/check_system.sh
-
-# 3. build + fly
-cd ~/px4_ros_ws
+# Terminal 2
+cd ~/px4_ros_ws && source install/setup.bash
 colcon build --packages-select survey perception && source install/setup.bash
+bash ~/px4_ros_ws/check_system.sh
+bash ~/px4_ros_ws/add_target.sh
 ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
-
-# 4. render the map
 ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
 ```
 
-Stop everything: `tmux kill-server`
+Run those Terminal-2 lines **one at a time**, waiting for each to finish. The
+`ros2 launch` line blocks until the flight is done — that's correct, not a hang.
+
+Stop everything: `tmux kill-server` (from anywhere).
 
 ---
 

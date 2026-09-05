@@ -24,7 +24,12 @@ DEFAULTS THAT CHANGED AFTER THE FIRST FULL CAMERA RUN
   classes:='person'   COCO weights invent airplane/kite/bird on empty nadir
                       ground with high confidence. Restrict to what you
                       actually placed. Use classes:='' to see everything.
-  conf:=0.40          was 0.25; the junk sat between 0.26 and 0.85.
+  conf:=0.65          separates real from hallucinated. Across four flights
+                      with COCO weights, false 'person' detections on empty
+                      ground topped out at 0.57 (0.30 0.42 0.44 0.46 0.46 0.51
+                      0.53 0.55 0.57) while real ones at the known target came
+                      in at 0.77, 0.81, 0.89. Nothing has ever landed between
+                      0.57 and 0.77. Use conf:=0.40 to see the junk again.
   require_gate:=true  no geotagging during climb, RTL or landing. The old run
                       logged "hazards" at 29.7 m on the way home.
   lookahead_m:=4.0    caps ground speed ~3.8 m/s. The first run flew lanes at
@@ -80,7 +85,7 @@ def generate_launch_description():
             description='ground-speed cap via setpoint lookahead; 0.0 = flat out'),
         # --- detection ---
         DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
-        DeclareLaunchArgument('conf', default_value='0.40'),
+        DeclareLaunchArgument('conf', default_value='0.65'),
         DeclareLaunchArgument('classes', default_value='person'),
         DeclareLaunchArgument('pose_lag_s', default_value='0.25'),
         DeclareLaunchArgument('max_alt_m', default_value='40.0'),

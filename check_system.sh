@@ -61,8 +61,18 @@ if [[ ! -f "$WS/install/setup.bash" ]]; then
     sk "build up to date" "nothing built yet"
 else
 for pkg in survey perception; do
-    src=$(find "$WS/src/$pkg" -name '*.py' -newer "$WS/install/$pkg" 2>/dev/null | head -1)
-    [[ -n "$src" ]] && stale="$stale $pkg"
+    # Compare the newest SOURCE .py against the newest INSTALLED .py.
+    # (The previous version compared against the install/<pkg> DIRECTORY, whose
+    # mtime only changes when its direct children do - so it reported "stale"
+    # immediately after a successful build. False alarms train you to ignore
+    # the check, which defeats the point of having it.)
+    src_t=$(find "$WS/src/$pkg" -name '*.py' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+    inst_t=$(find "$WS/install/$pkg" -name '*.py' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+    if [[ -z "$inst_t" ]]; then
+        stale="$stale $pkg(not-installed)"
+    elif awk "BEGIN{exit !(${src_t:-0} > $inst_t + 2)}"; then
+        stale="$stale $pkg"
+    fi
 done
 if [[ -n "$stale" ]]; then
     no "build up to date" "source newer than build:$stale" \
@@ -171,13 +181,29 @@ fi
 hdr "4 · inference"
 
 py_has() { python3 -c "import $1" >/dev/null 2>&1; }
-for m in cv2 numpy; do
-    py_has "$m" && ok "python: $m" "" || no "python: $m" "missing" "pip install --user opencv-python"
-done
-py_has ultralytics && ok "python: ultralytics" "" \
-                   || no "python: ultralytics" "missing" "pip install --user ultralytics"
-py_has matplotlib && ok "python: matplotlib" "(hazard_map)" \
-                  || no "python: matplotlib" "missing" "pip install --user matplotlib"
+
+# "missing" and "installed but won't import" are DIFFERENT faults with different
+# fixes, and calling both "missing" sends you in a circle: pip replies "already
+# satisfied" while the check keeps failing. Same trap as a topic being listed
+# but not published - report what is actually wrong.
+py_check() {   # module  pip-name  [note]
+    local err
+    if err=$(python3 -c "import $1" 2>&1); then
+        ok "python: $1" "${3:-}"
+    elif [[ "$err" == *"No module named"* ]]; then
+        no "python: $1" "not installed" "pip install --user $2"
+    else
+        local why
+        why=$(printf '%s' "$err" | grep -v '^\s*File \|^\s*$\|^Traceback' | tail -1 | cut -c1-58)
+        no "python: $1" "INSTALLED BUT BROKEN - $why" \
+           "pip install --user --upgrade $2     # usually a numpy ABI mismatch"
+    fi
+}
+
+py_check cv2         opencv-python
+py_check numpy       numpy
+py_check ultralytics ultralytics
+py_check matplotlib  matplotlib  "(hazard_map)"
 
 if py_has torch; then
     read -r TV CU GPU < <(python3 - <<'PY'
