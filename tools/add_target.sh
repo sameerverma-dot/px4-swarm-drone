@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # add_target.sh - spawn a detectable target into the RUNNING Gazebo sim.
 #
-#   bash ~/px4_ros_ws/add_target.sh              # person at PX4 N=10, E=15
-#   bash ~/px4_ros_ws/add_target.sh 20 5         # person at PX4 N=20, E=5
-#   bash ~/px4_ros_ws/add_target.sh 10 15 mine1  # give it a name
+#   bash ~/px4_ros_ws/tools/add_target.sh              # person at PX4 N=10, E=15
+#   bash ~/px4_ros_ws/tools/add_target.sh 20 5         # person at PX4 N=20, E=5
+#   bash ~/px4_ros_ws/tools/add_target.sh 10 15 mine1  # give it a name
 #
 # WHY THIS EXISTS
 # A model inserted by hand through the Gazebo GUI lives only in that session.

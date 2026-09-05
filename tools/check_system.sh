@@ -4,8 +4,8 @@
 # Probes the stack layer by layer and prints PASS / FAIL / SKIP for each, so a
 # failure tells you WHICH layer broke instead of "the mission didn't work".
 #
-#   bash ~/px4_ros_ws/check_system.sh          # full check (sim should be running)
-#   bash ~/px4_ros_ws/check_system.sh --quick  # skip the live-topic probes
+#   bash ~/px4_ros_ws/tools/check_system.sh          # full check (sim should be running)
+#   bash ~/px4_ros_ws/tools/check_system.sh --quick  # skip the live-topic probes
 #
 # Read-only: starts nothing, kills nothing, changes nothing.
 #
@@ -167,7 +167,7 @@ else
         ok "camera DELIVERING frames" "with GZ_IP=127.0.0.1"
     else
         no "camera DELIVERING frames" "advertised but silent" \
-           "GZ_IP mismatch - see CAMERA_DIAGNOSTIC.md"
+           "GZ_IP mismatch - see docs/CAMERA_DIAGNOSTIC.md"
     fi
 
     if timeout 6 ros2 topic echo "$CAM_GZ" --once >/dev/null 2>&1; then

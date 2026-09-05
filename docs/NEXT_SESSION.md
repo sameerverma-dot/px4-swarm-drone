@@ -11,18 +11,29 @@ Companion docs: `SYSTEM_GUIDE.md` (how it works) · `STACK_README.md` (how to ru
 
 ## 0. Read this first
 
-**The code has NOT been flown since it changed.** Everything in section 2 is
-reasoned from flight data, replayed against that data, and unit-tested - but not
-flight-verified. Section 4 step 1 is non-negotiable: re-fly before building on top.
+**The single-drone loop is VERIFIED** (5 Sep), and that is a milestone, not the
+deliverable. This is a **swarm** project - 2 to 5 drones - and there is still
+only one. The multi-vehicle work is the headline requirement, not polish.
 
-Fastest way to see where you stand:
-
-```bash
-bash ~/px4_ros_ws/check_system.sh
+```
+HAZARD #1: person conf=0.81 at N=10.7 E=14.9   truth N=10.0 E=15.0  ->  0.75 m
+VERIFY PASS | waypoints 9/9 (OK) | returned=True | 3125 track samples
 ```
 
-It probes six layers (environment, processes, telemetry, camera, inference,
-outputs) and prints PASS/FAIL per layer, so a failure names *which* layer broke.
+One detection, zero false positives, unattended, one command. Map and GeoJSON in
+`~/maps/phase1_final.png`.
+
+Before any flight:
+
+```bash
+bash ~/px4_ros_ws/tools/check_system.sh     # six layers, PASS/FAIL
+bash ~/px4_ros_ws/tools/add_target.sh       # the target is NOT in the world file
+```
+
+`tools/add_target.sh` matters more than it looks: a model inserted through the Gazebo
+GUI dies with that sim process. A flight on 5 Sep logged `VERIFY PASS`, flew
+perfect lanes over the target position, and found nothing - because there was
+nothing there.
 
 ---
 
@@ -111,7 +122,7 @@ behaviour. Lower it in QGC if it looks bad in the demo video.
 
 ---
 
-## 2. What changed in the code (untested in flight)
+## 2. What changed in the code  (all of it now flight-verified, 5 Sep)
 
 | # | Change | Where | Why |
 |---|---|---|---|
@@ -191,8 +202,8 @@ launcher · PX4↔ROS 2 DDS link · QGC · Gazebo camera → ROS 2 · YOLO on GP
 offboard boustrophedon survey with PASS/FAIL verification · RTL · pixel→ground
 axis mapping · full mission in one command.
 
-**Believed but not yet verified:**
-all five changes in section 2.
+**Verified in flight (5 Sep):** every change in section 2, plus the yaw fix,
+the derived lane spacing, `tools/add_target.sh`, and `hazard_map`.
 
 **Known-weak / placeholder:**
 
@@ -210,62 +221,68 @@ multi-drone swarm · trained weights · the entire hardware track.
 
 ## 4. Next session — ordered plan
 
-### Step 1 · Verify this session's fixes  *(~30 min — blocks everything)*
+Done and verified: the survey loop, the geotag fixes, the hazard map renderer,
+derived lane spacing, the yaw fix, the target spawner, the system self-test.
+What follows is what is actually left.
 
-```bash
-mv ~/maps/hazard_points.csv ~/maps/hazard_points_1788287.csv   # keep the old run
-cd ~/px4_ros_ws
-colcon build --packages-select survey perception && source install/setup.bash
-bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down       # separate terminal
-bash ~/px4_ros_ws/check_system.sh                              # all green before flying
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
-ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15  # after it lands
-```
+## Step 1 · The swarm — this IS the software deliverable
 
-Note there is no `lane_spacing` argument any more - it derives itself. Expect
-**3 lanes instead of 5**, and a visibly slower flight (~3.8 m/s, not 9.2).
+**Target 3 drones, build 2 first.** Two reads thin for something called a swarm;
+three is the minimum that forces a *general* N-way area split instead of a
+special case, and 2 -> 3 is then almost free. The project brief says 2-5.
 
-Check, in order:
+### The resource problem, before you write any code
 
-1. `detection gate -> OPEN` appears **after** the climb, `closed` **before** RTL.
-2. `HAZARD` lines are **only** `person`, and cluster near **N=10, E=15**.
-3. No rows above ~6 m altitude in `hazard_points.csv`.
-4. Lane ground speed ≈ 3.8 m/s — the flight will visibly take longer.
-5. `VERIFY PASS` still appears (the speed cap must not break waypoint reaching).
-6. `lane_spacing derived: footprint 11.85 m ... -> 8.30 m` in the log.
-7. The rendered map puts the `person` cluster inside the known-target ring.
+One drone currently costs: 1 PX4 SITL (CPU) + 1 camera rendering in Gazebo (GPU)
++ 1 YOLO detector (GPU) = ~11 FPS. Three drones triples all of it, and the GPU is
+already doing *both* rendering and inference. Naively spawning three of
+everything will collapse the real-time factor.
 
-**If step 2 shows North still off by >2 m**, raise `pose_lag_s` toward 0.35 and
-re-fly. Only if the *cross-track* (East) error goes bad should you touch the
-`geo_*` flags — and it was accurate to 0.4 m, so that is unlikely.
+**So do not run three detectors.** Run ONE detector node subscribed to all N
+camera topics, round-robin. This is better on four counts:
 
-### ~~Step 2 · Render the hazard map~~ — **DONE** (see §2.4)
+1. The model loads once instead of three times.
+2. Inference serialises on a single GPU anyway - three detector processes just
+   contend for it and add context-switching on top.
+3. It matches reality: a ground station does the detection, not each airframe.
+4. **Deduplication becomes correct for free.** The `min_sep_m` dedup list lives
+   inside the detector node, so three detectors appending to one
+   `hazard_points.csv` would never dedup against each other and the same target
+   would appear three times. One node owning one hazard list makes that
+   structural rather than something to bolt on afterwards.
 
-### ~~Step 3 · Fix `lane_spacing`~~ — **DONE** (see §2.3)
+Expect ~11 FPS shared three ways, so ~3.7 FPS per drone. At 3.8 m/s that is ~1 m
+of travel between frames against an 11.85 m footprint - still ample coverage.
 
-### Step 2 · Swarm — 2 drones  *(the big one)*
+### Order of work
 
-This is the headline Phase I requirement and it is untouched. Approach:
+1. **Second PX4 instance.** Launch with `-i 1` and a different
+   `PX4_GZ_MODEL_POSE`. Instance index > 0 is *expected* to namespace DDS topics
+   as `/px4_1/fmu/...`.
+2. **Verify that namespace with `ros2 topic hz` - do not assume it.** The single
+   most expensive bug of this project was assuming a documented topic name was
+   the live one. Check before building on it.
+3. **Parameterise `survey_node` with a `namespace` prefix** (the `/fmu/...`
+   topics are currently hardcoded).
+4. **Split the area along East** into N contiguous bands, one per drone. No
+   inter-drone messaging needed, and it degrades gracefully to 1 drone. True
+   coordination - dynamic reallocation, collision avoidance - is beyond Phase I.
+5. **Rework the detector to N camera topics, one hazard list** (see above).
+6. **Then 3 drones**, which should be a loop change only.
 
-1. Launch a second PX4 SITL instance with `-i 1` and a different
-   `PX4_GZ_MODEL_POSE`. Instance index > 0 is expected to namespace the DDS
-   topics as `/px4_1/fmu/...`.
-2. **Verify that namespace with `ros2 topic hz`, do not assume it.** This session's
-   whole lesson was that the documented topic name and the live one can differ.
-3. Parameterise `survey_node` with a `namespace` prefix (currently hardcoded
-   `/fmu/...`).
-4. Split the area: simplest correct approach is to divide the rectangle along Y
-   and give each drone a contiguous block of lanes — no inter-drone coordination
-   needed, and it degrades gracefully to 1 drone.
-5. Both drones write to the **same** `hazard_points.csv`. Check that the dedup
-   list is per-node — two nodes appending concurrently will interleave rows and
-   will *not* dedup against each other. Decide: one aggregator node, or a
-   per-drone CSV merged afterwards. **Prefer the aggregator.**
+### Two traps worth knowing now
 
-Do 2 drones and make them solid before going to 5. The jump from 1→2 contains
-every hard problem; 2→5 is mostly a loop.
+- **RTL converging.** PX4 climbs to `RTL_RETURN_ALT` (30 m here) before flying
+  home. Three drones finishing at once, all climbing to 30 m over the same field,
+  is a mid-air conflict. Stagger `RTL_RETURN_ALT` per instance, or stagger the
+  finish times.
+- **Home positions.** Each instance has its own home at its spawn point, so
+  "returned home" is per-drone. The hazard map's origin is drone 0's home -
+  make sure the other drones' local frames are offset into that same frame
+  before their detections go on one map, or the map will be wrong in a way that
+  looks plausible.
 
-### Step 3 · Start these in parallel, from day one
+## Step 2 · Start now, in parallel
 
 These two have **long lead times and low daily effort**, which is exactly why they
 must start now rather than "next":
@@ -279,7 +296,7 @@ must start now rather than "next":
   captured from your own sim camera would beat COCO. Starting this late means it
   will not be ready for the demo.
 
-### Step 4 (optional) · Chase the FPS
+## Step 3 (optional) · Chase the FPS
 
 Only if the demo looks bad. First measure whether Gazebo's real-time factor drops
 when the detector runs — that would confirm GPU contention and point at capping
@@ -290,7 +307,7 @@ the camera `update_rate`, rather than at detector code.
 ## 5. Pre-flight checklist (saves 20 minutes every time)
 
 1. Run the launcher from a **normal terminal**, never inside tmux.
-2. `bash ~/px4_ros_ws/check_system.sh` — or, by hand, prove telemetry is alive:
+2. `bash ~/px4_ros_ws/tools/check_system.sh` — or, by hand, prove telemetry is alive:
    `ros2 topic echo /fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once`
    (that form is unambiguous: `/fmu/out/*` is BEST_EFFORT, and a default RELIABLE
    subscriber matches nothing and reports silence even when data is flowing).

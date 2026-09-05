@@ -1,7 +1,7 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 1 Sep 2026 (full mission verified end-to-end; geotag calibrated)._
+_Last updated: 5 Sep 2026 (single-drone loop verified: 0.75 m geotag, zero false positives)._
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -11,18 +11,49 @@ _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 The **software / autonomy / AI pipeline is built and working end-to-end.**
 A single drone autonomously surveys a specified area and returns, via two
 independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
-The **AI detection pipeline is live and closed the loop**: on 1 Sep a single
-`ros2 launch survey mission.launch.py` flew all 11 waypoints, detected a `person`
-model placed at PX4 `N=10, E=15`, geotagged it, and returned home —
-`VERIFY PASS | waypoints 11/11 (OK) | returned=True`, 2585 track samples.
+### Where this actually stands
 
-Geolocation is calibrated: cross-track error was **under 0.5 m**. The remaining
-along-track error was traced to frame latency at 9.2 m/s ground speed, now fixed
-by pose time-matching (`pose_lag_s`) and a speed cap (`lookahead_m`).
+**The SINGLE-DRONE loop is verified.** That is a milestone, not the deliverable.
+This project is an autonomous **swarm** (2-5 drones) — one drone that surveys
+well is roughly 60 % of the software half, and the remaining 40 % (multi-vehicle)
+is not polish, it is the headline requirement.
 
-The real remaining gap is the **model**, not the pipeline: COCO `yolov8n` invents
-`airplane`/`kite`/`bird` on featureless nadir ground. Landmine weights trained on
-aerial imagery are the next substantive step.
+**Verified on 5 Sep**, one command, unattended:
+
+```
+HAZARD #1: person conf=0.81 at N=10.7 E=14.9   (truth N=10.0 E=15.0 -> 0.75 m)
+VERIFY PASS | waypoints 9/9 (OK) | returned=True | 3125 track samples
+```
+
+One detection. Zero false positives. Deliverable in `~/maps/phase1_final.png`
+plus a WGS84 GeoJSON.
+
+Geotag accuracy over three flights:
+
+| flight | ground speed | pose source | error at the known target |
+|---|---|---|---|
+| 1 Sep | 9.2 m/s | newest pose | 5.49 m, 1.38 m |
+| (replay prediction) | 3.8 m/s | `pose_lag` 0.25 | 0.96 m RMS |
+| **5 Sep** | **3.8 m/s** | **`pose_lag` 0.25** | **0.75 m** |
+
+Confidence separation with COCO weights, pooled over four flights — false
+positives on empty ground have **never** exceeded 0.57, real detections have
+never fallen below 0.77, so `conf:=0.65` is the default:
+
+| | confidences |
+|---|---|
+| false | 0.30 0.42 0.44 0.46 0.46 0.51 0.53 0.55 0.57 |
+| real | 0.77 0.81 0.89 |
+
+**Detection altitude is hard-capped by pixels on target.** A person is ~0.5 m
+across from above: 27 px at 5 m, 13 px at 10 m, and YOLO needs ~24 px. Measured
+sweep in `experiments/px_sweep.py`. Raising the camera to 1280 only helps if
+`imgsz` rises with it — otherwise ultralytics downscales the detail straight back
+out (measured: conf 0.06 vs 0.68 at 10 m).
+
+**Two gaps remain, and the model is the smaller one.** COCO `yolov8n` is a
+stand-in; landmine weights need nadir training data. But the larger gap is that
+there is still only one drone.
 
 | Capability | Status |
 |---|---|
@@ -38,7 +69,12 @@ aerial imagery are the next substantive step.
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
 | Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
-| Multi-drone swarm (2–5) | ⬜ Not started |
+| **Multi-drone swarm (2–5)** | ⬜ **NOT STARTED — this is the headline deliverable** |
+| Geotag accuracy vs known target | ✅ 0.75 m |
+| False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
+| Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
+| Target spawner (`tools/add_target.sh`) | ✅ GUI-inserted models die on restart |
+| System self-test (`tools/check_system.sh`) | ✅ six layers, PASS/FAIL |
 
 ---
 
@@ -87,7 +123,7 @@ aerial imagery are the next substantive step.
 | ROS 2 workspace | `~/px4_ros_ws` |
 | Launcher | `~/px4_ros_ws/start_px4_sim.sh` |
 | Survey package | `~/px4_ros_ws/src/survey/` (node, launch, package.xml, setup.py) |
-| Standalone survey script | `~/px4_ros_ws/survey_node.py` |
+| Standalone survey script (stale) | `~/px4_ros_ws/archive/survey_node.py` |
 | Perception package | `~/px4_ros_ws/src/perception/` (detector_node, launch, package.xml) |
 | Vendored msg/bridge pkgs | `~/px4_ros_ws/src/px4_msgs`, `~/px4_ros_ws/src/px4_ros_com` |
 | PX4 firmware / SITL | `~/PX4-Autopilot` |
@@ -217,9 +253,19 @@ so this is an optimisation, not a blocker.
 
 ## 7. Recommended next steps
 
-1. **Get a first real detection** — insert a COCO-class model (person/vehicle) into the Gazebo world under the survey area, fly a survey, and confirm a box in `rqt_image_view`, a `HAZARD #n` log line, and a row in `~/maps/hazard_points.csv`. That closes the M3/M5 loop.
-2. **Speed up (see 5.1)** — camera to 640×480 @ 10 Hz; GPU inference is already done
-   and confirmed *not* to be the bottleneck.
-3. **Train landmine weights** — build a small dataset, train YOLO, drop `best.pt` into the detector.
-4. **Scale to swarm (2–5)** — extend the launcher to spawn namespaced PX4 instances (`/px4_1`, `/px4_2`, …) and split a drawn area across drones.
-5. **Hardware track (Track B)** — 50% of the grade is self-designed/Make parts + a DFM + FEA/CFD design report; run this in parallel (see `PHASE1_ROADMAP.md`).
+1. **Scale to the swarm (2 -> 3 drones). This is the software deliverable.**
+   The single-drone loop is verified; the project is a *swarm*. Key decision to
+   make before writing code: run **one** detector node across all N camera
+   topics, not one per drone — the GPU is already shared between Gazebo's
+   renderer and YOLO, and a single detector also makes hazard deduplication
+   correct instead of something to bolt on. Full plan in `NEXT_SESSION.md`.
+2. **Hardware / Track B — start now, in parallel.** 50 % of the grade, zero
+   progress, and fabrication has queue times you do not control. This is the
+   largest risk to the final result and it is not a software problem.
+3. **Dataset for landmine weights.** Long lead time, low daily effort. COCO is a
+   stand-in and every reader will know it. You can now generate nadir imagery
+   from your own sim.
+4. **Optional: camera resolution.** 1280x960 *with* `imgsz` raised to match
+   doubles the usable survey altitude (5.6 m -> 11.2 m at conf 0.65) for ~2-4x
+   the inference cost. Measured in `experiments/px_sweep.py`. Only worth it if
+   coverage rate becomes the binding constraint.
