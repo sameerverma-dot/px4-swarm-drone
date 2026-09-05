@@ -22,9 +22,14 @@ PRE-REQ set in the PX4 (pxh>) console before arming from ROS 2:
   param set CBRK_SUPPLY_CHK 894281
 (otherwise external arming fails with "No connection to GCS")
 
-KNOWN FOLLOW-UP (left intentionally - do NOT fix unless asked):
-  lane_spacing is a hardcoded default. It should be derived from the downward
-  camera footprint: 2*altitude*tan(HFOV/2)*(1-sidelap) once the camera is wired.
+Heading: yaw_mode defaults to 'course' (face the direction of travel). Setpoints
+used to go out with the default yaw=0.0, which is an ACTIVE command to face
+North, so the drone crabbed sideways down every south-bound lane.
+Use yaw_mode:=fixed to get the old behaviour back.
+
+RESOLVED (was a known follow-up): lane_spacing is no longer a hardcoded guess -
+lane_spacing:=0.0 derives it from the camera footprint,
+2*altitude*tan(HFOV/2)*(1-sidelap).
 """
 
 import csv
@@ -90,6 +95,19 @@ class SurveyNode(Node):
         # Topic the detector listens on so it only geotags during actual survey
         # lanes - not during climb, RTL or landing.
         self.declare_parameter('detect_topic', '/survey/detecting')
+        # Heading control. Every TrajectorySetpoint used to go out with the
+        # default yaw=0.0, which is an ACTIVE command to face North - so the
+        # drone crabbed sideways down every south-bound lane.
+        #   'course' - face the direction of travel (default)
+        #   'fixed'  - hold fixed_yaw_deg (0 = North; the old behaviour)
+        #   'hold'   - send NaN, i.e. don't command yaw at all; PX4 keeps
+        #              whatever heading it has
+        self.declare_parameter('yaw_mode', 'course')
+        self.declare_parameter('fixed_yaw_deg', 0.0)
+        # Below this distance to the waypoint the bearing is numerically
+        # meaningless (atan2 of two tiny numbers), so freeze the last command
+        # instead of letting the nose twitch.
+        self.declare_parameter('yaw_deadzone_m', 1.0)
 
         g = self.get_parameter
         self.x_min = float(g('x_min').value)
@@ -109,6 +127,13 @@ class SurveyNode(Node):
         self.return_timeout_s = float(g('return_timeout_s').value)
         self.lookahead = float(g('lookahead_m').value)
         self.detect_topic = str(g('detect_topic').value)
+        self.yaw_mode = str(g('yaw_mode').value).strip().lower()
+        if self.yaw_mode not in ('course', 'fixed', 'hold'):
+            self.get_logger().warn(
+                f"unknown yaw_mode '{self.yaw_mode}' -> falling back to 'course'")
+            self.yaw_mode = 'course'
+        self.fixed_yaw = math.radians(float(g('fixed_yaw_deg').value))
+        self.yaw_deadzone = float(g('yaw_deadzone_m').value)
 
         self.z = -abs(self.altitude)  # NED down: negative = up
 
@@ -181,12 +206,13 @@ class SurveyNode(Node):
         self.returned = False
         self.detecting = None            # last value published on detect_topic
         self.reached_alt = False         # latched once we first reach survey altitude
+        self.cmd_yaw = self.fixed_yaw    # last yaw actually commanded (rad, NED)
 
         self.get_logger().info(
             f"Survey x[{self.x_min},{self.x_max}] y[{self.y_min},{self.y_max}] "
             f"alt={self.altitude}m lane={self.lane_spacing}m -> {len(self.wp)} waypoints; "
             f"RTL={'on' if self.rtl_on_complete else 'off'}, verify={self.verify}, "
-            f"lookahead={self.lookahead}m")
+            f"lookahead={self.lookahead}m, yaw={self.yaw_mode}")
         self.publish_detecting(False)
 
         self.timer = self.create_timer(0.1, self.tick)  # 10 Hz
@@ -257,6 +283,36 @@ class SurveyNode(Node):
         m.timestamp = self.us()
         self.pub_sp.publish(m)
 
+    def climb_yaw(self):
+        """Yaw during the vertical climb: NaN (leave it alone) unless the user
+        explicitly asked for a fixed heading."""
+        return self.fixed_yaw if self.yaw_mode == 'fixed' else float('nan')
+
+    def desired_yaw(self, tx, ty):
+        """Yaw to command while heading for waypoint (tx, ty), in radians.
+
+        PX4 yaw is measured from NORTH, positive toward EAST. Local NED has
+        x=North and y=East, so the bearing from here to the target is
+        atan2(delta_east, delta_north) - i.e. atan2(dy, dx), NOT the atan2(y, x)
+        you would write for a normal maths plot.
+
+        Returns NaN in 'hold' mode: PX4 treats a NaN yaw setpoint as "don't
+        control yaw", which is different from commanding 0 (= face North).
+        """
+        if self.yaw_mode == 'hold':
+            return float('nan')
+        if self.yaw_mode == 'fixed':
+            return self.fixed_yaw
+        # 'course' - face the direction of travel
+        if self.pos_valid:
+            dx, dy = tx - self.pos.x, ty - self.pos.y
+            if math.hypot(dx, dy) >= self.yaw_deadzone:
+                self.cmd_yaw = math.atan2(dy, dx)
+        # Inside the deadzone (or before we have a position) keep the last
+        # command, so the nose does not spin while the drone climbs or settles
+        # onto a waypoint.
+        return self.cmd_yaw
+
     def send_sp_limited(self, x, y, z, yaw=0.0):
         """Position setpoint with a speed cap.
 
@@ -326,7 +382,9 @@ class SurveyNode(Node):
             self.send_ocm()
 
         if self.phase == Phase.INIT:
-            self.send_sp(*self.wp[0])
+            # Straight up at home: no horizontal course exists, so don't
+            # command a heading - NaN leaves the drone's yaw alone.
+            self.send_sp(*self.wp[0], yaw=self.climb_yaw())
             self.counter += 1
             if self.counter >= 10:      # ~1 s of setpoints before switching
                 self.engage_offboard()
@@ -337,7 +395,7 @@ class SurveyNode(Node):
             return
 
         if self.phase == Phase.ENGAGE:
-            self.send_sp(*self.wp[0])
+            self.send_sp(*self.wp[0], yaw=self.climb_yaw())
             if self.is_offboard and self.is_armed:
                 self.get_logger().info("Offboard engaged + armed -> starting survey")
                 self.phase = Phase.SURVEY
@@ -353,7 +411,10 @@ class SurveyNode(Node):
 
         if self.phase == Phase.SURVEY:
             tx, ty, tz = self.wp[self.wp_idx]
-            self.send_sp_limited(tx, ty, tz)
+            # Bearing is taken to the TRUE waypoint, never to the carrot: the
+            # carrot converges onto the drone near arrival, where the bearing
+            # between them is numerically unstable and can flip 180 degrees.
+            self.send_sp_limited(tx, ty, tz, self.desired_yaw(tx, ty))
             # wp[0] is the climb straight up at home - nothing under us to map,
             # and the projection is garbage while altitude is still changing.
             # reached_alt is LATCHED: without it the gate chatters open/closed

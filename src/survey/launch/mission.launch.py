@@ -32,6 +32,10 @@ DEFAULTS THAT CHANGED AFTER THE FIRST FULL CAMERA RUN
                       Replaying that flight's data: 3.98 m RMS along-track
                       error -> 0.96 m with the cap plus pose_lag 0.25.
   lane_spacing:=0.0   derived from the camera footprint instead of guessed.
+  yaw_mode:=course    the drone faces where it is going. Setpoints previously
+                      carried the default yaw=0.0, which actively commands
+                      "face North", so it crabbed sideways down every
+                      south-bound lane. yaw_mode:=fixed restores that.
 
 Useful overrides:
     weights:=/home/sam/runs/detect/train/weights/best.pt   # your trained model
@@ -65,6 +69,11 @@ def generate_launch_description():
             'lane_spacing', default_value='0.0',
             description='0.0 derives it from the camera footprint at this altitude'),
         DeclareLaunchArgument('sidelap', default_value='0.3'),
+        DeclareLaunchArgument(
+            'yaw_mode', default_value='course',
+            description="course = face direction of travel; fixed = locked to "
+                        "fixed_yaw_deg (0 = North, the old behaviour); hold = "
+                        "don't command yaw"),
         DeclareLaunchArgument('rtl_on_complete', default_value='true'),
         DeclareLaunchArgument(
             'lookahead_m', default_value='4.0',
@@ -108,6 +117,7 @@ def generate_launch_description():
             'altitude': LaunchConfiguration('altitude'),
             'lane_spacing': LaunchConfiguration('lane_spacing'),
             'sidelap': LaunchConfiguration('sidelap'),
+            'yaw_mode': LaunchConfiguration('yaw_mode'),
             'rtl_on_complete': LaunchConfiguration('rtl_on_complete'),
             'lookahead_m': LaunchConfiguration('lookahead_m'),
         }.items(),
