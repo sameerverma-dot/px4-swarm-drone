@@ -258,7 +258,9 @@ so this is an optimisation, not a blocker.
    make before writing code: run **one** detector node across all N camera
    topics, not one per drone — the GPU is already shared between Gazebo's
    renderer and YOLO, and a single detector also makes hazard deduplication
-   correct instead of something to bolt on. Full plan in `NEXT_SESSION.md`.
+   correct instead of something to bolt on. Coverage arithmetic and the
+   sequencing decision are in `SWARM_PLAN.md`; the step-by-step is in
+   `NEXT_SESSION.md`.
 2. **Hardware / Track B — start now, in parallel.** 50 % of the grade, zero
    progress, and fabrication has queue times you do not control. This is the
    largest risk to the final result and it is not a software problem.

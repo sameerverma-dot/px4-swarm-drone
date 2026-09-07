@@ -9,6 +9,11 @@ landmines from a downward camera, and produces a geotagged hazard map.
 geotag, return, verify — at **0.75 m** geotag accuracy with zero false
 positives. The **multi-drone swarm is the remaining software deliverable.**
 
+The governing constraint: detection needs ~24 px on target, which caps flight
+altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px). Altitude sets
+lane spacing, which sets flight time, which sets what the swarm buys — so read
+`docs/SWARM_PLAN.md` before changing any of them.
+
 ---
 
 ## Run it
@@ -55,6 +60,7 @@ deliverable).
 | understand **how** any of this works | `docs/SYSTEM_GUIDE.md` |
 | know what's done, what's broken, what's next | `docs/PROGRESS.md` |
 | pick up where the last session stopped | `docs/NEXT_SESSION.md` |
+| decide the swarm design — altitudes, drone count, resolution | `docs/SWARM_PLAN.md` |
 | check deliverables and the grading split | `docs/PHASE1_ROADMAP.md` |
 | debug a camera that shows a topic but no data | `docs/CAMERA_DIAGNOSTIC.md` |
 

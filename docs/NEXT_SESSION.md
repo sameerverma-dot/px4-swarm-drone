@@ -227,6 +227,17 @@ What follows is what is actually left.
 
 ## Step 1 · The swarm — this IS the software deliverable
 
+> **Read `SWARM_PLAN.md` first.** It works the coverage arithmetic out from
+> measured parameters and settles three things this section only asserts:
+> the altitude ceiling (5.6 m at 640 px), whether one shared detector can feed
+> three drones (yes, 5x headroom), and whether the camera upgrade should come
+> before or after the swarm (**before** — lane spacing depends on it).
+>
+> One correction it forces: raising capture to 1280 is worth about *one* extra
+> drone, not more. Three 640 drones (2.5 min/ha) still beat one 1280 drone
+> (3.8 min/ha). The upgrade is worth doing first because it is two numbers in
+> an SDF, not because it replaces the swarm.
+
 **Target 3 drones, build 2 first.** Two reads thin for something called a swarm;
 three is the minimum that forces a *general* N-way area split instead of a
 special case, and 2 -> 3 is then almost free. The project brief says 2-5.
@@ -269,6 +280,14 @@ of travel between frames against an 11.85 m footprint - still ample coverage.
    coordination - dynamic reallocation, collision avoidance - is beyond Phase I.
 5. **Rework the detector to N camera topics, one hazard list** (see above).
 6. **Then 3 drones**, which should be a loop change only.
+7. **Validate the coverage model** on a differently-sized area while you are
+   flying anyway — `SWARM_PLAN.md` §6 has one fitted constant that no flight has
+   yet tested. Free data, and it turns a caveat into a result.
+
+**Demo warning from the model:** at 1280/11.2 m your 30x20 arena needs only two
+lanes, so two drones and three finish at the same time — the parallelism has
+nothing to divide. To *show* the swarm working, fly 640/5.6 m or enlarge the
+area to ~60x60 m. Decide this before you build.
 
 ### Two traps worth knowing now
 
