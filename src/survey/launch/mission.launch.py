@@ -87,6 +87,9 @@ def generate_launch_description():
         DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
         DeclareLaunchArgument('conf', default_value='0.65'),
         DeclareLaunchArgument('classes', default_value='person'),
+        # Camera capture is 1280x960 (mono_cam SDF) - imgsz must match or
+        # ultralytics downscales the detail back out. See SWARM_PLAN.md.
+        DeclareLaunchArgument('imgsz', default_value='1280'),
         DeclareLaunchArgument('pose_lag_s', default_value='0.25'),
         DeclareLaunchArgument('max_alt_m', default_value='40.0'),
         DeclareLaunchArgument('require_gate', default_value='true'),
@@ -105,6 +108,7 @@ def generate_launch_description():
             'weights': LaunchConfiguration('weights'),
             'conf': LaunchConfiguration('conf'),
             'classes': LaunchConfiguration('classes'),
+            'imgsz': LaunchConfiguration('imgsz'),
             'pose_lag_s': LaunchConfiguration('pose_lag_s'),
             'max_alt_m': LaunchConfiguration('max_alt_m'),
             'require_gate': LaunchConfiguration('require_gate'),

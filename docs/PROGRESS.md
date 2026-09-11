@@ -1,7 +1,10 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 5 Sep 2026 (single-drone loop verified: 0.75 m geotag, zero false positives)._
+_Last updated: 7 Sep 2026 (camera bumped to 1280x960 + matching imgsz; swarm_
+namespacing/area-split/shared-detector scaffolding built and topic-level
+verified live on 2 PX4 instances — see section 8. Single-drone loop is still
+the only thing flight-verified: 0.75 m geotag, zero false positives)._
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -69,7 +72,8 @@ there is still only one drone.
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
 | Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
-| **Multi-drone swarm (2–5)** | ⬜ **NOT STARTED — this is the headline deliverable** |
+| Camera capture 1280x960 + imgsz to match | ✅ Built & live-verified (section 8.1) |
+| **Multi-drone swarm (2–5)** | 🟡 **Scaffolding built, 2-instance topics verified live — no mission flown yet (section 8)** |
 | Geotag accuracy vs known target | ✅ 0.75 m |
 | False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
 | Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
@@ -253,21 +257,149 @@ so this is an optimisation, not a blocker.
 
 ## 7. Recommended next steps
 
-1. **Scale to the swarm (2 -> 3 drones). This is the software deliverable.**
-   The single-drone loop is verified; the project is a *swarm*. Key decision to
-   make before writing code: run **one** detector node across all N camera
-   topics, not one per drone — the GPU is already shared between Gazebo's
-   renderer and YOLO, and a single detector also makes hazard deduplication
-   correct instead of something to bolt on. Coverage arithmetic and the
-   sequencing decision are in `SWARM_PLAN.md`; the step-by-step is in
-   `NEXT_SESSION.md`.
+1. **Fly the swarm scaffolding built in section 8.** Topics and the camera
+   bump are verified live; a real 2-drone survey (arm, offboard, both fly
+   their band, RTL, one combined `hazard_points.csv`) has not been flown.
+   That is the next thing to actually run — see 8.4.
 2. **Hardware / Track B — start now, in parallel.** 50 % of the grade, zero
    progress, and fabrication has queue times you do not control. This is the
    largest risk to the final result and it is not a software problem.
 3. **Dataset for landmine weights.** Long lead time, low daily effort. COCO is a
    stand-in and every reader will know it. You can now generate nadir imagery
-   from your own sim.
-4. **Optional: camera resolution.** 1280x960 *with* `imgsz` raised to match
-   doubles the usable survey altitude (5.6 m -> 11.2 m at conf 0.65) for ~2-4x
-   the inference cost. Measured in `experiments/px_sweep.py`. Only worth it if
-   coverage rate becomes the binding constraint.
+   from your own sim — and now at 1280x960.
+4. **Validate the coverage model** (SWARM_PLAN.md section 6) on a
+   differently-sized area once the swarm actually flies — the model's one
+   fitted constant (`turn_penalty_s`) has never been tested against anything
+   but the flight it was fit to.
+
+---
+
+## 8. Swarm scaffolding — built 7 Sep, topic-level verified live, NOT flight-verified
+
+Everything below is new code, checked by (a) a clean `colcon build`, and (b) a
+live 2-instance smoke test of the one thing this project has learned NOT to
+assume — that a namespaced topic actually publishes, not just lists (the
+lesson from the versioned-topic bug in section 6). **No autonomous mission
+has been flown on this code yet** — that is deliberately left as the next
+session's first task (8.4), not claimed here.
+
+### 8.1 Camera resolution: 640x480 -> 1280x960 (built + live-verified)
+
+- `~/PX4-Autopilot/Tools/simulation/gz/models/mono_cam/model.sdf`: capture
+  bumped to 1280x960 (`hfov` unchanged at 1.74 rad — this doubles pixel
+  density at a given altitude, it doesn't change field of view). Shared by
+  both `x500_mono_cam` and `x500_mono_cam_down` via `<include>`.
+- `imgsz` default raised to 1280 in `detector_node.py`, `perception.launch.py`,
+  and `mission.launch.py` (still overridable) so inference actually uses the
+  extra resolution instead of ultralytics downscaling it back out (the
+  conf 0.06 vs 0.68 measurement in `experiments/px_sweep.py`).
+- **Live-verified**: `gz topic -e .../camera/image -n 1` on a running sim
+  showed `width: 1280 / height: 960`.
+- Per SWARM_PLAN.md this raises the detection-altitude ceiling from 5.6 m to
+  11.2 m at the same `conf`. Nothing has re-flown a real detection at the new
+  altitude yet — do that before trusting the new ceiling in a demo.
+
+### 8.2 Multi-drone plumbing: namespacing, area split, shared detector (built)
+
+- **`survey_node.py`**: new `namespace` param (default `''` = instance 0,
+  unnamespaced — identical to the old behaviour) prefixes every `/fmu/...`
+  topic. New `csv_prefix` param (default `'survey_track'`, unchanged) so
+  simultaneous drones don't collide on the same-second track CSV filename.
+  **Also fixed a latent bug found while doing this**: `VehicleCommand.
+  target_system` was hardcoded to `1`. PX4's `Commander::handle_command`
+  silently *drops* any command whose `target_system` doesn't match its own
+  `vehicle_status.system_id` — and PX4's own `rcS` sets `MAV_SYS_ID =
+  instance + 1`. So instance 1 (`MAV_SYS_ID=2`) would have silently ignored
+  every arm/offboard command from a namespace-aware `survey_node`, i.e.
+  exactly this project's GZ_IP/versioned-topic class of bug, undiscovered
+  until the first swarm flight. Changed to `target_system=0` (broadcast —
+  safe here because each instance's command topic is already isolated by the
+  DDS namespace, not by system id).
+- **`detector_node.py`**: reworked to serve N drones with ONE model load and
+  ONE hazard list (SWARM_PLAN.md's "5x headroom, no reason to run N
+  detectors" argument), via new plural params — `image_topics`,
+  `pose_namespaces`, `gate_topics`, `annotated_topics`, `home_offsets`
+  (`;`-separated, one entry per drone). All default to `''`, which falls back
+  to the original singular params for exactly one, unnamespaced drone — every
+  existing single-drone command is unaffected byte-for-byte. `home_offsets`
+  (`'north,east'` metres per drone) folds each drone's own local-NED
+  detections into ONE shared frame (drone 0's home), per the trap flagged in
+  `NEXT_SESSION.md` — untested that trap is actually handled correctly until
+  a real multi-drone flight produces detections from more than one drone.
+- **`perception.launch.py`**: now spawns one `ros_gz_bridge` per camera topic
+  (via `OpaqueFunction`, since the bridge count depends on the *resolved*
+  value of `image_topics`) and exactly one `detector_node`.
+- **`swarm_mission.launch.py`** (new): splits one survey area into
+  `num_drones` bands along EAST, launches one `survey_node` per drone (each
+  flying the *same* local box — the split is realised by where the sim spawns
+  each drone, not by different per-drone coordinates) plus one shared
+  `perception.launch.py` include with the plural params filled in.
+- **`tools/start_px4_swarm.sh`** (new): launches N PX4 instances in one tmux
+  session — instance 0 hosts the Gazebo world (`make px4_sitl`, identical to
+  `start_px4_sim.sh`), instances 1..N-1 spawn into it standalone
+  (`PX4_GZ_STANDALONE=1`, `PX4_GZ_MODEL_POSE`), matching PX4's own documented
+  multi-vehicle convention. Also staggers `RTL_RETURN_ALT` per instance
+  (`NEXT_SESSION.md`'s "RTL converging" trap: simultaneous RTLs climbing to
+  the same altitude over the same field).
+- **The band math must agree between the shell script and the launch file.**
+  They compute the same numbers (spawn offset / local survey box / detector
+  `home_offsets`) independently, from `NUM_DRONES`/`Y_MIN`/`Y_MAX` and
+  `num_drones`/`y_min`/`y_max` respectively — there is no shared source of
+  truth. Pass matching values or the map will look plausible and be wrong,
+  exactly the trap `NEXT_SESSION.md` already flagged for this reason.
+
+### 8.3 What was actually verified live tonight (not just built)
+
+A 2-instance smoke test (`tools/start_px4_swarm.sh`, then torn down —
+no mission flown) confirmed, with real running processes, not documentation:
+
+- Instance 1's DDS topics are namespaced `/px4_1/fmu/...` exactly as PX4's
+  `rcS` predicts, and — the actual test, since a listed topic proves nothing —
+  `ros2 topic hz /px4_1/fmu/out/vehicle_local_position_v1` showed a genuine
+  **~50 Hz** live rate, same as instance 0's unnamespaced `/fmu/out/...`.
+- Instance 1's Gazebo camera topic is
+  `/world/default/model/x500_mono_cam_down_1/link/camera_link/sensor/camera/image`
+  — confirmed via `gz topic -l`, matching the pattern
+  `swarm_mission.launch.py` and `start_px4_swarm.sh` both assume (verified
+  against PX4's `px4-rc.gzsim` source, not guessed).
+- Camera capture is genuinely 1280x960 on the wire (`gz topic -e`, one frame).
+
+Separately, a `ros2 launch survey swarm_mission.launch.py num_drones:=2`
+**dry run** (no sim running - just checking the launch graph resolves
+correctly) caught a real bug before it reached a flight: `pose_namespaces`
+built as `';/px4_1'` was silently collapsing to `['/px4_1']` and broadcasting
+to BOTH drones instead of `['', '/px4_1']`, because `detector_node.py`'s
+list-splitting helper dropped empty segments - exactly the kind of
+plausible-but-wrong result this project's methodology exists to catch. Fixed
+(`_split()` now treats an empty segment as data, only the whole-string-empty
+case as "not configured"), rebuilt, and the same dry run then showed the
+correct `drone 0: pose_ns=''` / `drone 1: pose_ns='/px4_1'`, correct distinct
+`gate` topics, and correct `offset=(0,10)` for drone 1. A second dry run with
+`survey_delay:=1` also confirmed both `survey_node_0` (`ns='(none)'`) and
+`survey_node_1` (`ns='/px4_1'`) start with distinct names and the same local
+survey box (`y=[0,10]`), as intended - the split is realised by where the sim
+spawns each drone, not by different per-drone coordinates.
+
+**Not verified**: arming/offboard/waypoints on a namespaced instance (the
+`target_system=0` fix above is un-flight-tested), the detector actually
+receiving two live camera streams and merging hazards into one deduplicated
+list, and RTL staggering under a real return-to-launch. All of the above was
+config/wiring verification with no PX4/Gazebo sim running for the dry runs -
+it proves the launch graph is correct, not that a mission flies.
+
+### 8.4 Next actual step
+
+```bash
+# terminal 1
+NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash ~/px4_ros_ws/tools/start_px4_swarm.sh gz_x500_mono_cam_down
+
+# terminal 2, AFTER checking namespacing (don't assume it):
+ros2 topic hz /px4_1/fmu/out/vehicle_local_position_v1
+cd ~/px4_ros_ws && source install/setup.bash
+bash tools/add_target.sh          # then place a second target for drone 1's band
+ros2 launch survey swarm_mission.launch.py num_drones:=2 x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
+```
+Watch for: both drones arming and reaching offboard (the `target_system=0`
+fix), both flying their own band without drifting into the other's, one
+combined `hazard_points.csv` with a `drone` column, and no mid-air RTL
+conflict at the end.

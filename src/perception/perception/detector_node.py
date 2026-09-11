@@ -42,6 +42,33 @@ THREE THINGS THAT MAKE THE MAP TRUSTWORTHY (added after the first full run)
 
 GEO-LOCATION IS STILL APPROXIMATE (Phase I): assumes a level drone, a perfect
 nadir camera, and flat ground at home altitude.
+
+--------------------------------------------------------------------------
+MULTI-DRONE (SWARM): ONE detector, N cameras, ONE hazard list
+--------------------------------------------------------------------------
+SWARM_PLAN.md's numbers say a single shared detector has 5x headroom across
+3 drones, so this node was built to serve N drones rather than spawn N
+detector processes: one model load, no extra GPU contention, and correct
+deduplication for free (one `self.hazards` list, not one per drone racing
+to append to the same CSV).
+
+Multi-drone mode is opt-in via the PLURAL parameters (image_topics,
+pose_namespaces, gate_topics, annotated_topics, home_offsets), all
+semicolon-separated, one entry per drone, same order. Leaving them empty
+(the default) falls back to the original singular parameters (image_topic,
+gate_topic, annotated_topic) for exactly one, unnamespaced drone - so every
+existing single-drone launch command is unaffected.
+
+pose_namespaces entries are PX4 DDS namespace prefixes, e.g. '' (instance 0,
+unnamespaced /fmu/...) or '/px4_1' (instance 1). See PX4's rcS: instance N
+gets namespace 'px4_N', instance 0 gets none.
+
+home_offsets entries are 'north,east' metres to ADD to that drone's
+NADIR-PROJECTED position so all drones' hazards land in ONE shared frame -
+the origin of drone 0's home, per NEXT_SESSION.md's stated trap: each PX4
+instance's local NED frame originates at ITS OWN spawn point, so drone 1's
+raw (north, east) is meaningless next to drone 0's unless shifted by
+however far drone 1 was spawned from drone 0's home.
 """
 
 import bisect
@@ -50,6 +77,7 @@ import math
 import os
 import time
 from collections import deque
+from functools import partial
 
 import numpy as np
 
@@ -86,7 +114,12 @@ class DetectorNode(Node):
         self.declare_parameter('min_sep_m', 2.0)            # dedup radius (metres)
         self.declare_parameter('classes', '')               # '' = all; else CSV of names to keep
         self.declare_parameter('device', '')                # '' = auto (cuda if available), else 'cuda:0'/'cpu'
-        self.declare_parameter('imgsz', 640)                # inference size; smaller = much faster
+        # Inference size. Camera capture is 1280x960 (mono_cam SDF) - imgsz must
+        # match or ultralytics downscales the detail straight back out (measured
+        # in experiments/px_sweep.py: conf 0.06 vs 0.68 at 10 m for the same
+        # 1280 capture at imgsz 640 vs 1280). This is what raises the altitude
+        # ceiling from 5.6 m to 11.2 m per SWARM_PLAN.md.
+        self.declare_parameter('imgsz', 1280)
         self.declare_parameter('half', True)                # fp16 on GPU (ignored on CPU)
         # --- geolocation quality ---
         self.declare_parameter('pose_lag_s', 0.25)          # camera+bridge latency to compensate
@@ -99,6 +132,15 @@ class DetectorNode(Node):
         self.declare_parameter('geo_swap_axes', False)
         self.declare_parameter('geo_flip_forward', False)
         self.declare_parameter('geo_flip_right', False)
+        # --- multi-drone (swarm): semicolon-separated, one entry per drone,
+        # same order across all four. Empty = single drone, using the
+        # singular params above (image_topic/gate_topic/annotated_topic),
+        # unnamespaced (instance 0) and no home offset. See docstring.
+        self.declare_parameter('image_topics', '')
+        self.declare_parameter('pose_namespaces', '')
+        self.declare_parameter('gate_topics', '')
+        self.declare_parameter('annotated_topics', '')
+        self.declare_parameter('home_offsets', '')
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -178,15 +220,51 @@ class DetectorNode(Node):
                 self.get_logger().info(
                     f"class filter active: {sorted(self.keep)} -> ids {self.keep_ids}")
 
-        # ---- pose ring buffer (time-matched geolocation, docstring point 1) ----
-        # Wall-clock keyed; entries are (t, x, y, z, heading). ~10 s at 50 Hz.
-        self.pose_t = deque(maxlen=600)
-        self.pose_v = deque(maxlen=600)
-        self.hazards = []   # list of (north, east) already recorded
+        # ---- multi-drone drone list (see module docstring) ----
+        # Each entry: image_topic, pose_ns (PX4 DDS namespace prefix, '' =
+        # instance 0 / unnamespaced), gate_topic, annotated_topic,
+        # (offset_north, offset_east) to fold this drone's local NED frame
+        # into the shared map frame. Falls back to the singular params for
+        # exactly one drone when the plural params are all unset, so a plain
+        # single-drone launch is byte-for-byte the old behaviour.
+        img_topics = self._split(gp('image_topics').value)
+        n = len(img_topics) if img_topics else 1
+        pose_ns = self._split(gp('pose_namespaces').value, expect=n, default='')
+        gate_topics = self._split(gp('gate_topics').value, expect=n,
+                                   default=str(gp('gate_topic').value))
+        annot_topics = self._split(gp('annotated_topics').value, expect=n,
+                                    default=str(gp('annotated_topic').value))
+        offsets = self._split(gp('home_offsets').value, expect=n, default='0,0')
+        if not img_topics:
+            img_topics = [self.image_topic]
 
-        # ---- detection gate (docstring point 2) ----
-        self.gate = not self.require_gate
-        self.gate_seen = False
+        self.drones = []
+        for i in range(n):
+            on, oe = (float(v) for v in offsets[i].split(','))
+            self.drones.append({
+                'image_topic': img_topics[i],
+                'pose_ns': pose_ns[i],
+                'gate_topic': gate_topics[i],
+                'annotated_topic': annot_topics[i] if n == 1 else self._per_drone_topic(annot_topics[i], i, n),
+                'offset_n': on, 'offset_e': oe,
+                # pose ring buffer (time-matched geolocation, docstring point 1):
+                # wall-clock keyed, entries (t, x, y, z, heading). ~10 s at 50 Hz.
+                'pose_t': deque(maxlen=600),
+                'pose_v': deque(maxlen=600),
+                # detection gate (docstring point 2)
+                'gate': not self.require_gate,
+                'gate_seen': False,
+                'pub_annot': None,
+            })
+        if n > 1:
+            self.get_logger().info(
+                f"multi-drone mode: {n} drones sharing one detector + one hazard list")
+            for i, d in enumerate(self.drones):
+                self.get_logger().info(
+                    f"  drone {i}: image='{d['image_topic']}' pose_ns='{d['pose_ns']}' "
+                    f"gate='{d['gate_topic']}' offset=({d['offset_n']:.1f},{d['offset_e']:.1f})")
+
+        self.hazards = []   # list of (north, east) already recorded - shared across all drones
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -197,57 +275,127 @@ class DetectorNode(Node):
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
             history=HistoryPolicy.KEEP_LAST, depth=1)
 
-        self.create_subscription(Image, self.image_topic, self.on_image, qos_profile_sensor_data)
-        # PX4 publishes VehicleLocalPosition on the versioned topic
-        # (/fmu/out/vehicle_local_position_v1) on this build; other builds use the
-        # unversioned name. Subscribe to both. Without this the pose buffer stays
-        # empty forever and NO detection can ever be geotagged.
-        for t in ('/fmu/out/vehicle_local_position', '/fmu/out/vehicle_local_position_v1'):
-            self.create_subscription(VehicleLocalPosition, t, self.on_pos, px4_qos)
-        self.create_subscription(Bool, str(gp('gate_topic').value), self.on_gate, gate_qos)
-
-        self.pub_annot = self.create_publisher(Image, self.annotated_topic, 1)
+        # Image QoS: BEST_EFFORT, KEEP_LAST, depth **1**.
+        #
+        # qos_profile_sensor_data has depth 5. The camera publishes at 15 Hz;
+        # at imgsz 1280 the detector consumes ~2.9 FPS, so the queue sits FULL
+        # and every frame handed to on_image is already ~4 frames (~0.27 s)
+        # old before transport is even counted. That staleness lands directly
+        # in the geotag: the 8 Sep flight at 10 m needed 0.76 s of pose_lag to
+        # centre a detection that 0.25 s used to cover, and put the target 2.9 m
+        # out instead of 0.75 m.
+        #
+        # Depth 1 makes the middleware DROP the backlog and hand over the
+        # newest frame, which fixes the cause instead of compensating for it —
+        # and it stays correct as the drone count changes, whereas a hand-tuned
+        # pose_lag would need re-measuring for every N (a shared detector at
+        # N drones consumes each stream N times slower, so the backlog, and the
+        # error, would grow with the swarm).
+        img_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST, depth=1)
+        for i, d in enumerate(self.drones):
+            self.create_subscription(
+                Image, d['image_topic'], partial(self.on_image, drone_idx=i),
+                img_qos)
+            # PX4 publishes VehicleLocalPosition on the versioned topic
+            # (.../vehicle_local_position_v1) on this build; other builds use the
+            # unversioned name. Subscribe to both. Without this the pose buffer
+            # stays empty forever and NO detection can ever be geotagged.
+            ns = d['pose_ns']
+            for t in (f'{ns}/fmu/out/vehicle_local_position', f'{ns}/fmu/out/vehicle_local_position_v1'):
+                self.create_subscription(
+                    VehicleLocalPosition, t, partial(self.on_pos, drone_idx=i), px4_qos)
+            self.create_subscription(
+                Bool, d['gate_topic'], partial(self.on_gate, drone_idx=i), gate_qos)
+            if self.publish_annotated:
+                d['pub_annot'] = self.create_publisher(Image, d['annotated_topic'], 1)
 
         os.makedirs(os.path.dirname(self.hazard_csv), exist_ok=True)
         if not os.path.exists(self.hazard_csv):
             with open(self.hazard_csv, 'w', newline='') as f:
                 csv.writer(f).writerow(
-                    ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m'])
+                    ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m', 'drone'])
 
         self.frame_count = 0
+        for i, d in enumerate(self.drones):
+            self.get_logger().info(
+                f"detector up: drone {i} image='{d['image_topic']}' -> "
+                f"annotated='{d['annotated_topic']}', hazards -> {self.hazard_csv}")
         self.get_logger().info(
-            f"detector up: image='{self.image_topic}' -> annotated='{self.annotated_topic}', "
-            f"hazards -> {self.hazard_csv}")
-        self.get_logger().info(
-            f"gate='{gp('gate_topic').value}' require_gate={self.require_gate} "
-            f"| pose_lag={self.pose_lag}s | alt window [{self.min_alt}, {self.max_alt}] m")
+            f"require_gate={self.require_gate} | pose_lag={self.pose_lag}s | "
+            f"alt window [{self.min_alt}, {self.max_alt}] m | imgsz={self.imgsz}")
+
+    # ---------- helpers ----------
+    def _split(self, value, expect=None, default=None):
+        """';'-separated param -> list of stripped strings.
+
+        An EMPTY SEGMENT IS MEANINGFUL DATA here (e.g. pose_namespaces' ''
+        means "instance 0, unnamespaced") and must NOT be dropped - only the
+        whole-string-empty case ('', no ';' at all) means "not configured,
+        broadcast `default` to every drone" (the single-drone fallback path).
+        Dropping empty segments would shift every entry after the first ''
+        down by one and silently misassign a drone's topic to another
+        drone's pose - which is exactly what an earlier version of this
+        function did (caught by a launch dry-run: pose_namespaces=';/px4_1'
+        collapsed to ['/px4_1'] and broadcast to BOTH drones instead of
+        ['', '/px4_1']).
+
+        With `expect` given (a drone count): a single entry broadcasts that
+        one value to every drone. Anything else that doesn't match `expect`
+        in length is padded/truncated with `default` and a warning is
+        logged, so a swarm launch with a missing entry fails loud (wrong
+        count in the log) rather than silently misassigning a drone.
+        """
+        value = str(value)
+        items = [] if value.strip() == '' else [s.strip() for s in value.split(';')]
+        if expect is None:
+            return items
+        if not items:
+            return [default] * expect
+        if len(items) == expect:
+            return items
+        if len(items) == 1:
+            return items * expect
+        self.get_logger().warn(
+            f"expected {expect} ';'-separated entries, got {len(items)}: {items} "
+            f"-> padding/truncating with {default!r}")
+        return (items + [default] * expect)[:expect]
+
+    @staticmethod
+    def _per_drone_topic(base, i, n):
+        return base if n <= 1 else f"{base}_{i}"
 
     # ---------- callbacks ----------
-    def on_pos(self, msg):
+    def on_pos(self, msg, drone_idx=0):
         if not (msg.xy_valid and msg.z_valid):
             return
-        self.pose_t.append(time.time())
-        self.pose_v.append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
+        d = self.drones[drone_idx]
+        d['pose_t'].append(time.time())
+        d['pose_v'].append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
 
-    def on_gate(self, msg):
+    def on_gate(self, msg, drone_idx=0):
+        d = self.drones[drone_idx]
         new = bool(msg.data)
-        if new != self.gate or not self.gate_seen:
-            self.get_logger().info(f"detection gate -> {'OPEN' if new else 'closed'}")
-        self.gate = new
-        self.gate_seen = True
+        if new != d['gate'] or not d['gate_seen']:
+            self.get_logger().info(f"drone {drone_idx} detection gate -> {'OPEN' if new else 'closed'}")
+        d['gate'] = new
+        d['gate_seen'] = True
 
-    def pose_at(self, t):
-        """Nearest buffered pose to wall-clock time t. None if the buffer is empty
-        or the closest sample is more than 0.5 s away (stale/no telemetry)."""
-        if not self.pose_t:
+    def pose_at(self, t, drone_idx=0):
+        """Nearest buffered pose (for the given drone) to wall-clock time t.
+        None if that drone's buffer is empty or the closest sample is more
+        than 0.5 s away (stale/no telemetry)."""
+        d = self.drones[drone_idx]
+        ts = d['pose_t']
+        if not ts:
             return None
-        ts = self.pose_t
         i = bisect.bisect_left(ts, t)
         cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
         j = min(cand, key=lambda k: abs(ts[k] - t))
         if abs(ts[j] - t) > 0.5:
             return None
-        return self.pose_v[j]
+        return d['pose_v'][j]
 
     def img_to_np(self, msg):
         """sensor_msgs/Image -> HxWx3 BGR numpy (handles rgb8/bgr8).
@@ -305,7 +453,11 @@ class DetectorNode(Node):
         east = y + fwd * math.sin(yaw) + right * math.cos(yaw)
         return north, east
 
-    def record_hazard(self, north, east, cls, conf, alt):
+    def record_hazard(self, north, east, cls, conf, alt, drone_idx=0):
+        # Shared across every drone: this ONE list (and CSV) is what makes
+        # dedup correct for a swarm instead of something to bolt on - N
+        # detector processes each appending to the same file would never
+        # dedup against each other. See module docstring.
         for (hn, he) in self.hazards:
             if math.hypot(north - hn, east - he) < self.min_sep:
                 return False            # already have one here
@@ -313,16 +465,17 @@ class DetectorNode(Node):
         with open(self.hazard_csv, 'a', newline='') as f:
             csv.writer(f).writerow(
                 [f"{time.time():.1f}", f"{north:.2f}", f"{east:.2f}",
-                 cls, f"{conf:.2f}", f"{alt:.1f}"])
+                 cls, f"{conf:.2f}", f"{alt:.1f}", str(drone_idx)])
         self.get_logger().info(
             f"HAZARD #{len(self.hazards)}: {cls} conf={conf:.2f} at "
-            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m)")
+            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m, drone {drone_idx})")
         return True
 
-    def on_image(self, msg):
+    def on_image(self, msg, drone_idx=0):
         # Timestamp FIRST: everything after this (decode, inference) is latency we
         # must not attribute to the drone's position.
         t_rx = time.time()
+        d = self.drones[drone_idx]
 
         frame = self.img_to_np(msg)
         if frame is None:
@@ -331,9 +484,9 @@ class DetectorNode(Node):
         # Gated off (climb / RTL / landing / no survey running): skip INFERENCE,
         # which is the expensive part, but keep republishing the raw frame so
         # rqt_image_view stays live. A frozen video feed looks like a crash.
-        if not self.gate:
-            if self.publish_annotated:
-                self.pub_annot.publish(self.np_to_img(frame, msg.header))
+        if not d['gate']:
+            if self.publish_annotated and d['pub_annot'] is not None:
+                d['pub_annot'].publish(self.np_to_img(frame, msg.header))
             return
         self.frame_count += 1
         if self.frame_count % 50 == 0:
@@ -353,11 +506,11 @@ class DetectorNode(Node):
         r = results[0]
         img_h, img_w = frame.shape[:2]
 
-        pose = self.pose_at(t_rx - self.pose_lag)
+        pose = self.pose_at(t_rx - self.pose_lag, drone_idx=drone_idx)
         if pose is None and len(r.boxes) and self.frame_count % 50 == 0:
             self.get_logger().warn(
-                "detections but no pose within 0.5 s of the frame - "
-                "is PX4 telemetry flowing? (geotagging skipped)")
+                f"drone {drone_idx}: detections but no pose within 0.5 s of the "
+                f"frame - is its PX4 telemetry flowing? (geotagging skipped)")
 
         for box in r.boxes:
             cls_id = int(box.cls[0])
@@ -380,10 +533,15 @@ class DetectorNode(Node):
                 continue
             g = self.project_to_ground(u, v, img_w, img_h, pose)
             if g is not None:
-                self.record_hazard(g[0], g[1], name, conf, -pose[2])
+                # Fold this drone's own local-NED detection into the shared
+                # map frame (drone 0's home) before recording it - see the
+                # home_offsets note in the module docstring.
+                north = g[0] + d['offset_n']
+                east = g[1] + d['offset_e']
+                self.record_hazard(north, east, name, conf, -pose[2], drone_idx=drone_idx)
 
-        if self.publish_annotated:
-            self.pub_annot.publish(self.np_to_img(frame, msg.header))
+        if self.publish_annotated and d['pub_annot'] is not None:
+            d['pub_annot'].publish(self.np_to_img(frame, msg.header))
 
 
 def main(args=None):

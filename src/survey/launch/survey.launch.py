@@ -51,10 +51,22 @@ def generate_launch_description():
         # 'fixed'  = hold fixed_yaw_deg (0 = North - the old locked behaviour)
         # 'hold'   = don't command yaw at all
         'yaw_mode': 'course',
+        # PX4 DDS namespace prefix, e.g. '/px4_1' for instance 1.
+        # '' (default) = instance 0, unnamespaced - single-drone behaviour.
+        'namespace': '',
+        # Track-CSV filename prefix. Give each swarm drone a distinct value
+        # (e.g. survey_track_d0/d1) or simultaneous finishes can collide -
+        # write_csv() names the file by whole seconds.
+        'csv_prefix': 'survey_track',
     }
 
     decls = [DeclareLaunchArgument(k, default_value=v)
              for k, v in {**float_defaults, **bool_defaults, **str_defaults}.items()]
+    # ROS node name, NOT a survey_node.py parameter: two Node actions named
+    # 'survey_node' in the same run collide. swarm_mission.launch.py gives
+    # each drone a unique value (survey_node_0, survey_node_1, ...); a plain
+    # single-drone launch keeps the original name.
+    decls.append(DeclareLaunchArgument('node_name', default_value='survey_node'))
 
     params = {}
     for k in float_defaults:
@@ -67,7 +79,7 @@ def generate_launch_description():
     node = Node(
         package='survey',
         executable='survey_node',
-        name='survey_node',
+        name=LaunchConfiguration('node_name'),
         output='screen',
         parameters=[params],
     )
