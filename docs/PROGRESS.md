@@ -1,10 +1,11 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 7 Sep 2026 (camera bumped to 1280x960 + matching imgsz; swarm_
-namespacing/area-split/shared-detector scaffolding built and topic-level
-verified live on 2 PX4 instances — see section 8. Single-drone loop is still
-the only thing flight-verified: 0.75 m geotag, zero false positives)._
+_Last updated: 12 Sep 2026 (**the 2-drone swarm is flight-verified** — both
+drones flew their own band, both logged VERIFY PASS, and drone 1's detection
+came back in drone 0's frame within 1.7 m, which is `home_offsets` proven
+rather than assumed. See section 9. Section 8's "NOT flight-verified" caveat is
+now discharged.)_
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -16,10 +17,13 @@ A single drone autonomously surveys a specified area and returns, via two
 independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
 ### Where this actually stands
 
-**The SINGLE-DRONE loop is verified.** That is a milestone, not the deliverable.
-This project is an autonomous **swarm** (2-5 drones) — one drone that surveys
-well is roughly 60 % of the software half, and the remaining 40 % (multi-vehicle)
-is not polish, it is the headline requirement.
+**The 2-DRONE SWARM is flight-verified** as of 12 Sep (section 9), which closes
+the headline software requirement. The single-drone loop below remains the
+accuracy baseline everything is measured against.
+
+Remaining on the software side: a third drone, a multi-target map renderer, and
+landmine weights in place of the COCO stand-in. **Hardware (Track B) is 50 % of
+the grade and is still at zero** — it is now the project's largest risk.
 
 **Verified on 5 Sep**, one command, unattended:
 
@@ -73,7 +77,7 @@ there is still only one drone.
 | Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
 | Camera capture 1280x960 + imgsz to match | ✅ Built & live-verified (section 8.1) |
-| **Multi-drone swarm (2–5)** | 🟡 **Scaffolding built, 2-instance topics verified live — no mission flown yet (section 8)** |
+| **Multi-drone swarm (2–5)** | ✅ **2 drones flight-verified 12 Sep — both VERIFY PASS, cross-frame geotag 1.70 m (section 9).** 🟡 3+ untried; both bands not yet targeted in one run |
 | Geotag accuracy vs known target | ✅ 0.75 m |
 | False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
 | Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
@@ -274,7 +278,8 @@ so this is an optimisation, not a blocker.
 
 ---
 
-## 8. Swarm scaffolding — built 7 Sep, topic-level verified live, NOT flight-verified
+## 8. Swarm scaffolding — built 7 Sep, topic-level verified live
+### (this section's "NOT flight-verified" caveat was discharged on 12 Sep — see section 9)
 
 Everything below is new code, checked by (a) a clean `colcon build`, and (b) a
 live 2-instance smoke test of the one thing this project has learned NOT to
@@ -403,3 +408,98 @@ Watch for: both drones arming and reaching offboard (the `target_system=0`
 fix), both flying their own band without drifting into the other's, one
 combined `hazard_points.csv` with a `drone` column, and no mid-air RTL
 conflict at the end.
+
+---
+
+## 9. The 2-drone swarm, flight-verified (12 Sep)
+
+Section 8 built the swarm and verified the wiring. This section is the flight.
+
+```
+[survey_node_0]: lane_spacing derived: footprint 23.71 m at 10.0 m altitude,
+                 30% sidelap -> 16.59 m
+[survey_node_0]: Survey ns='(none)'   x[0.0,30.0] y[0.0,30.0] alt=10.0m -> 7 waypoints
+[detector_node]: drone 0 detection gate -> OPEN
+[detector_node]: drone 1 detection gate -> OPEN
+[detector_node]: HAZARD #1: person conf=0.72 at N=8.3 E=44.7 (alt 10.0m, drone 1)
+[survey_node_0]: VERIFY PASS | waypoints 7/7 (OK) | returned=True | 3035 samples
+[survey_node_1]: VERIFY PASS | waypoints 7/7 (OK) | returned=True | 3140 samples
+```
+
+### 9.1 What this actually proves
+
+Every item section 8.3 listed as **Not verified** is now verified:
+
+| 8.3 said "not verified" | 12 Sep result |
+|---|---|
+| arming/offboard on a namespaced instance (`target_system=0` untested) | `survey_node_1` armed, held offboard, flew 7/7 waypoints |
+| detector receiving two live camera streams | both gates opened, both streams consumed by one node |
+| hazards merged into one frame | `hazard_points.csv` has one list with a `drone` column |
+| RTL staggering under a real return-to-launch | both returned, no mid-air conflict |
+
+**The number that matters is E=44.7.** The target was spawned at global
+N=10, E=45. Drone 1's own local NED origin sits 30 m east, so its raw
+observation was local E≈14.7 — and the detector added the 30 m back on.
+
+| | truth | reported | error |
+|---|---|---|---|
+| North | 10.0 | 8.32 | **-1.68 m** |
+| East | 45.0 | 44.74 | **-0.26 m** |
+| total | | | **1.70 m** |
+
+That is `home_offsets` working on real telemetry. A wrong offset would not have
+been off by 1.7 m; it would have been off by 30.
+
+The error itself is in family with the single-drone 1280 px / 10 m scatter
+(2.31 m RMS on 8 Sep), so the swarm adds no measurable geolocation penalty —
+which is the expected result, since each drone geotags in its own frame and the
+offset is a constant.
+
+### 9.2 What this run did NOT prove, and the fix
+
+**Only drone 0's band had ever had a target.** This run was flown with a single
+person spawned at E=45, so `hazard_points.csv` gained exactly one row for the
+whole sortie, and drone 0 flew a clean, verified, completely empty survey.
+
+Half the swarm was therefore untested for detection. `tools/add_swarm_targets.sh`
+(new, 12 Sep) fixes this by construction: it computes each band centre with the
+same `(Y_MAX-Y_MIN)/N` arithmetic as `start_px4_swarm.sh` and
+`swarm_mission.launch.py`, and spawns one person per band, so every drone has
+something to find and every per-drone offset is checked independently.
+
+```bash
+NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh
+```
+
+Re-fly 9.1 with it before calling the 2-drone case closed. **Expect 2 rows in
+`hazard_points.csv`, with distinct values in the `drone` column.**
+
+### 9.3 Known gaps this run exposed
+
+- **`hazard_map` is still single-drone.** `--truth` takes one point and
+  `--track` plots one CSV, so on an N-drone run it scores one band and draws one
+  of the N flight paths. The other detections do appear as points. Multi-target
+  and multi-track rendering is an open item — it matters because the map *is*
+  the deliverable.
+- **`hazard_points.csv` appends across runs.** The file currently holds three
+  stale rows from the 8 Sep single-drone flight alongside the one row from this
+  one. Move it aside before every scored flight, or the map compares two
+  sorties. (Those three stale rows are also the pre-fix `min_sep_m=2.0`
+  triple-count of one person, kept as the evidence behind raising it to 4.5.)
+- **3 drones is untried.** Expected to be a loop change only — the launcher, the
+  launch file and the target spawner are all already parameterised on `N` — but
+  "expected" is not "verified", and this project has a standing rule about the
+  difference.
+
+### 9.4 Where the software deliverable stands
+
+The autonomous swarm loop — launch N, split the area, fly concurrently, detect,
+geotag into one shared frame, return, verify — **runs end to end.** That was the
+last unproven piece of the software half.
+
+What remains on the software side is breadth and polish, not unknowns: a third
+drone, a multi-target map, and landmine weights in place of the COCO
+`person` stand-in.
+
+**Hardware (Track B) is 50 % of the grade and remains at zero.** Nothing in this
+section changes that, and it is now the single largest risk to the project.

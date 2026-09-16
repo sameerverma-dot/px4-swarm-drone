@@ -23,14 +23,17 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 |---|---|
 | **Survey node** (flight logic) | `src/survey/survey/survey_node.py` |
 | **Detector node** (YOLO + geotag) | `src/perception/perception/detector_node.py` |
-| Mission launch (survey + detect) | `src/survey/launch/mission.launch.py` |
+| Mission launch — 1 drone (survey + detect) | `src/survey/launch/mission.launch.py` |
+| Mission launch — **N drones** | `src/survey/launch/swarm_mission.launch.py` |
 | Survey-only launch | `src/survey/launch/survey.launch.py` |
 | Perception-only launch | `src/perception/launch/perception.launch.py` |
 | Offline detector test | `src/perception/test_perception.py` |
 | Map renderer | `src/perception/perception/hazard_map.py` |
 | System self-test | `tools/check_system.sh` |
-| Stack launcher | `start_px4_sim.sh` (root) |
-| Target spawner | `tools/add_target.sh` |
+| Stack launcher — 1 drone | `start_px4_sim.sh` (root) |
+| Stack launcher — **N drones** | `tools/start_px4_swarm.sh` |
+| Target spawner — 1 target | `tools/add_target.sh` |
+| Target spawner — **one per band** | `tools/add_swarm_targets.sh` |
 | Camera diagnostic | `tools/diagnose_camera.sh` |
 | Docs | `docs/` |
 | Experiments | `experiments/` |
@@ -47,13 +50,22 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 
 | File | What |
 |---|---|
-| `survey_track_<unix_ts>.csv` | `t_s, x_ned, y_ned, z_ned` — the flown path |
-| `hazard_points.csv` | `t_s, x_ned_north, y_ned_east, class, conf, alt_m` — detections |
+| `survey_track_<unix_ts>.csv` | `t_s, x_ned, y_ned, z_ned` — the flown path (1-drone runs) |
+| `survey_track_d<i>_<ts>.csv` | the same, one file **per drone**, on swarm runs |
+| `hazard_points.csv` | `t_s, x_ned_north, y_ned_east, class, conf, alt_m, drone` — detections |
 | `hazard_map_<ts>.png` | the rendered map — the actual deliverable |
 | `hazard_map_<ts>.geojson` | same points in WGS84, for QGIS / Google Earth |
 
 `hazard_points.csv` **appends across runs**. Move it aside before a fresh flight
-or you'll be comparing two flights mixed together.
+or you'll be comparing two flights mixed together:
+
+```bash
+mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv
+```
+
+The `drone` column tells you which aircraft logged each hit. On a swarm run all
+N drones write to this **one** file, on purpose — one detector owns one hazard
+list, so deduplication across overlapping band edges actually works.
 
 ## 4. WHERE do I run this? — the logic
 
@@ -103,6 +115,7 @@ Terminal 2  ── your working terminal. source install/setup.bash once, then:
 
 Terminal 3  ── only when you want to watch the camera:
                ros2 run rqt_image_view rqt_image_view /detection/image_annotated
+               (swarm runs: /detection/image_annotated_0, _1, ... one per drone)
 ```
 
 ### Every command in these docs, and where it goes
@@ -110,11 +123,14 @@ Terminal 3  ── only when you want to watch the camera:
 | Command | Where | Why |
 |---|---|---|
 | `bash start_px4_sim.sh ...` | **Terminal 1, own terminal, NOT inside tmux** | long-running; it *creates* the tmux session, so nesting breaks it |
+| `bash tools/start_px4_swarm.sh` | **Terminal 1, same rules** | same — the N-drone version |
 | `colcon build ...` | Terminal 2 | finishes; must be in `~/px4_ros_ws` |
 | `source install/setup.bash` | Terminal 2, after every build | teaches that terminal where your packages are |
 | `bash tools/check_system.sh` | Terminal 2 | finishes; read-only |
 | `bash tools/add_target.sh` | Terminal 2, **after** the sim is up | talks to a *running* Gazebo |
+| `bash tools/add_swarm_targets.sh` | Terminal 2, after the swarm sim is up | same, one target per band |
 | `ros2 launch survey mission...` | Terminal 2 | long-running — it owns the terminal until the flight ends |
+| `ros2 launch survey swarm_mission...` | Terminal 2 | same, N drones at once |
 | `ros2 run perception hazard_map` | Terminal 2, after the flight | reads the CSVs the flight just wrote |
 | `ros2 topic echo/hz ...` | Terminal 2 or the tmux ROS pane | needs ROS sourced |
 | `gz topic -l`, `gz model --list` | anywhere, with `GZ_IP=127.0.0.1` | talks to Gazebo, not ROS |
@@ -123,30 +139,131 @@ Terminal 3  ── only when you want to watch the camera:
 | `pip install ...` | anywhere | plain Linux |
 | `tmux kill-server` | anywhere | stops the whole stack |
 
-### The normal sequence
-
-```bash
-# Terminal 1
-bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
-# wait for QGC to show the drone connected
-
-# Terminal 2
-cd ~/px4_ros_ws && source install/setup.bash
-colcon build --packages-select survey perception && source install/setup.bash
-bash ~/px4_ros_ws/tools/check_system.sh
-bash ~/px4_ros_ws/tools/add_target.sh
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
-ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
-```
-
-Run those Terminal-2 lines **one at a time**, waiting for each to finish. The
-`ros2 launch` line blocks until the flight is done — that's correct, not a hang.
+The exact sequences are in section 5.
 
 Stop everything: `tmux kill-server` (from anywhere).
 
 ---
 
-## 5. Pushing to GitHub
+## 5. Runbooks — 1 drone and 2 drones
+
+Two rules that apply to both, and cause most failed runs:
+
+- **`cd ~/px4_ros_ws` first.** `source install/setup.bash` is a *relative* path.
+  Run it from `~` and you get `bash: install/setup.bash: No such file or
+  directory`, then every `ros2` command fails with "message type ... is
+  invalid" — because without sourcing, that terminal has never heard of
+  `px4_msgs`. The error looks like a broken build. It is a wrong directory.
+- **One line at a time in Terminal 2.** The `ros2 launch` line blocks until the
+  flight finishes — that is correct, not a hang. Paste a block and everything
+  after the launch line queues up behind it, or worse, runs before the sim is up.
+
+### 5a. Single drone
+
+```bash
+# ── Terminal 1 ─ own terminal, NOT inside tmux ───────────────────────────
+bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
+# wait for QGroundControl to show the drone connected
+
+# ── Terminal 2 ─ one line at a time ──────────────────────────────────────
+cd ~/px4_ros_ws
+source install/setup.bash
+colcon build --packages-select survey perception && source install/setup.bash
+bash tools/check_system.sh                      # want 0 FAIL
+mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv   # if one exists
+bash tools/add_target.sh                        # person at PX4 N=10 E=15
+ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
+ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
+
+# ── Terminal 3 ─ optional, watch the camera ──────────────────────────────
+cd ~/px4_ros_ws && source install/setup.bash
+ros2 run rqt_image_view rqt_image_view /detection/image_annotated
+```
+
+At 10 m altitude use `altitude:=10.0` and the 1280 px camera — 640 px at 10 m is
+below the ~24 px detection floor and will find nothing (`docs/SWARM_PLAN.md` §1).
+
+### 5b. Two drones
+
+Same shape, three differences: a different launcher, a target in **every** band,
+and one verification step you must not skip.
+
+```bash
+# ── Terminal 1 ─ own terminal, NOT inside tmux ───────────────────────────
+NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash ~/px4_ros_ws/tools/start_px4_swarm.sh gz_x500_mono_cam_down
+# instance 0 builds + hosts the world; instance 1 spawns into it 30 m east.
+# Only one drone visible in Gazebo is usually NOT a failure — the camera is
+# looking at instance 0 and instance 1 is off-screen to the east. Check the
+# topics, not the viewport.
+
+# ── Terminal 2 ─ one line at a time ──────────────────────────────────────
+cd ~/px4_ros_ws
+source install/setup.bash
+
+# VERIFY the second instance is actually alive before flying anything.
+# This project's most expensive bug was assuming a topic name. Note _v1:
+# this build publishes on the VERSIONED names only.
+ros2 topic hz /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort
+# ~50 Hz -> good. Nothing at all -> instance 1 never booted; check
+# log/swarm_launch_*/px4_sitl_1.log before going further. Ctrl-C to continue.
+
+bash tools/check_system.sh
+mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv   # if one exists
+
+# A target in EVERY band — one per drone.
+NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh
+
+ros2 launch survey swarm_mission.launch.py num_drones:=2 \
+    x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
+
+ros2 run perception hazard_map --area 0,30,0,60 --truth 15,15
+
+# ── Terminal 3 ─ optional, one viewer per drone ──────────────────────────
+cd ~/px4_ros_ws && source install/setup.bash
+ros2 run rqt_image_view rqt_image_view /detection/image_annotated_0
+# and in another: /detection/image_annotated_1
+```
+
+**`num_drones`, `y_min` and `y_max` must match in all three places** —
+`start_px4_swarm.sh`, `add_swarm_targets.sh`, and `swarm_mission.launch.py`.
+They each compute the band geometry independently and there is no shared source
+of truth between a shell script and a ROS launch file. Disagree on any of them
+and the drones fly bands that do not contain the targets, which looks exactly
+like a broken detector.
+
+**What "it worked" looks like** — the 12 Sep run:
+
+```
+[survey_node_0]: Survey ns='(none)' x[0.0,30.0] y[0.0,30.0] alt=10.0m -> 7 waypoints
+[detector_node]: drone 0 detection gate -> OPEN
+[detector_node]: drone 1 detection gate -> OPEN
+[detector_node]: HAZARD #1: person conf=0.72 at N=8.3 E=44.7 (alt 10.0m, drone 1)
+[survey_node_0]: VERIFY PASS | waypoints 7/7 (OK) | returned=True
+[survey_node_1]: VERIFY PASS | waypoints 7/7 (OK) | returned=True
+```
+
+The line that matters is the E=44.7. Drone 1's own local frame has its origin
+30 m east, so it saw that person at local E≈14.7 — and the detector added the
+30 m back on to put it in drone 0's frame. That is `home_offsets` working, and
+it is the whole point of the swarm run.
+
+### Scaling to 3
+
+```bash
+NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash ~/px4_ros_ws/tools/start_px4_swarm.sh gz_x500_mono_cam_down
+NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash tools/add_swarm_targets.sh
+ros2 launch survey swarm_mission.launch.py num_drones:=3 \
+    x_max:=30.0 y_min:=0.0 y_max:=90.0 altitude:=10.0
+```
+
+Keep the **band height** at 30 m as you add drones (so `Y_MAX = 30 × N`) rather
+than subdividing a fixed area. At 10 m altitude lane spacing is ~16.6 m, so a
+band much narrower than that gives a drone a single pass with nothing to divide
+— the swarm stops demonstrating anything (`docs/SWARM_PLAN.md` §4).
+
+---
+
+## 6. Pushing to GitHub
 
 Repo: **`github.com/sameerverma-dot/px4-swarm-drone`**, remote `origin`, branch `main`.
 
