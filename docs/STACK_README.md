@@ -169,7 +169,7 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 - Mouse is enabled — click a pane to focus it, scroll with the wheel
   (press `q` to leave scroll mode before typing again)
 - `Ctrl-b` then `d` — detach (stack keeps running); `tmux attach -t px4_sim` to return
-- `tmux kill-server` — stop everything
+- `bash ~/px4_ros_ws/tools/stop_sim.sh` — stop everything (`tmux kill-server` alone leaves PX4 and Gazebo running)
 
 Left pane = DDS agent · right pane = PX4 console (`pxh>`) · bottom = ROS 2 shell.
 

@@ -79,6 +79,17 @@ def generate_launch_description():
             description="course = face direction of travel; fixed = locked to "
                         "fixed_yaw_deg (0 = North, the old behaviour); hold = "
                         "don't command yaw"),
+        # These two were declared by survey_node.py but forwarded by NOBODY, so
+        # `yaw_mode:=fixed fixed_yaw_deg:=90` silently flew at 0 deg. Exactly the
+        # failure survey.launch.py's docstring warns about: a parameter that
+        # exists on the node but cannot be reached from a launch file.
+        DeclareLaunchArgument(
+            'fixed_yaw_deg', default_value='0.0',
+            description='heading in degrees from North; only used when yaw_mode:=fixed'),
+        DeclareLaunchArgument(
+            'yaw_deadzone_m', default_value='1.0',
+            description='inside this distance to the waypoint the bearing is '
+                        'numerically meaningless, so the last yaw is held'),
         DeclareLaunchArgument('rtl_on_complete', default_value='true'),
         DeclareLaunchArgument(
             'lookahead_m', default_value='4.0',
@@ -127,6 +138,8 @@ def generate_launch_description():
             'lane_spacing': LaunchConfiguration('lane_spacing'),
             'sidelap': LaunchConfiguration('sidelap'),
             'yaw_mode': LaunchConfiguration('yaw_mode'),
+            'fixed_yaw_deg': LaunchConfiguration('fixed_yaw_deg'),
+            'yaw_deadzone_m': LaunchConfiguration('yaw_deadzone_m'),
             'rtl_on_complete': LaunchConfiguration('rtl_on_complete'),
             'lookahead_m': LaunchConfiguration('lookahead_m'),
         }.items(),

@@ -29,7 +29,8 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 | Perception-only launch | `src/perception/launch/perception.launch.py` |
 | Offline detector test | `src/perception/test_perception.py` |
 | Map renderer | `src/perception/perception/hazard_map.py` |
-| System self-test | `tools/check_system.sh` |
+| System self-test (probes every drone) | `tools/check_system.sh` |
+| **Stop the whole stack** | `tools/stop_sim.sh` |
 | Stack launcher — 1 drone | `start_px4_sim.sh` (root) |
 | Stack launcher — **N drones** | `tools/start_px4_swarm.sh` |
 | Target spawner — 1 target | `tools/add_target.sh` |
@@ -137,11 +138,13 @@ Terminal 3  ── only when you want to watch the camera:
 | `commander takeoff`, `param set ...` | **the `pxh>` pane only** | these are PX4's own commands |
 | `git ...` | Terminal 2, in `~/px4_ros_ws` | plain Linux |
 | `pip install ...` | anywhere | plain Linux |
-| `tmux kill-server` | anywhere | stops the whole stack |
+| `bash tools/stop_sim.sh` | anywhere | stops the whole stack and checks nothing is left |
 
 The exact sequences are in section 5.
 
-Stop everything: `tmux kill-server` (from anywhere).
+Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` (from anywhere). **Not**
+`tmux kill-server`: it closes the panes but `make px4_sitl`, PX4 and both
+`gz sim` processes survive it and keep holding the GPU (seen repeatedly, 27 Sep).
 
 ---
 
@@ -172,7 +175,8 @@ colcon build --packages-select survey perception && source install/setup.bash
 bash tools/check_system.sh                      # want 0 FAIL
 mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv   # if one exists
 bash tools/add_target.sh                        # person at PX4 N=10 E=15
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
+ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0
+# survey_node exits by itself after VERIFY; Ctrl-C the launch to stop the detector
 ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
 
 # ── Terminal 3 ─ optional, watch the camera ──────────────────────────────
@@ -190,7 +194,8 @@ and one verification step you must not skip.
 
 ```bash
 # ── Terminal 1 ─ own terminal, NOT inside tmux ───────────────────────────
-NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash ~/px4_ros_ws/tools/start_px4_swarm.sh gz_x500_mono_cam_down
+bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 2 --y-min 0 --y-max 60 gz_x500_mono_cam_down
+# (env-var form NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash ... works too)
 # instance 0 builds + hosts the world; instance 1 spawns into it 30 m east.
 # Only one drone visible in Gazebo is usually NOT a failure — the camera is
 # looking at instance 0 and instance 1 is off-screen to the east. Check the
@@ -203,11 +208,18 @@ source install/setup.bash
 # VERIFY the second instance is actually alive before flying anything.
 # This project's most expensive bug was assuming a topic name. Note _v1:
 # this build publishes on the VERSIONED names only.
-ros2 topic hz /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort
-# ~50 Hz -> good. Nothing at all -> instance 1 never booted; check
-# log/swarm_launch_*/px4_sitl_1.log before going further. Ctrl-C to continue.
+ros2 topic echo /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once
+# One message of plausible numbers -> instance 1 is alive. An error or a hang
+# -> it never booted; read log/swarm_launch_*/px4_sitl_1.log before going on.
+#
+# It must be `echo`, not `hz`. In Humble ONLY `ros2 topic echo` takes
+# --qos-reliability; `ros2 topic hz` rejects it with "unrecognized arguments".
+# And bare `ros2 topic hz` on a /fmu/out/* topic usually prints nothing at all,
+# because it subscribes RELIABLE while PX4 publishes BEST_EFFORT — incompatible
+# QoS means no data, which looks identical to a dead instance. `echo --once`
+# is the test that actually answers the question.
 
-bash tools/check_system.sh
+bash tools/check_system.sh      # auto-detects both instances, probes each
 mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv   # if one exists
 
 # A target in EVERY band — one per drone.
@@ -215,14 +227,29 @@ NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh
 
 ros2 launch survey swarm_mission.launch.py num_drones:=2 \
     x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
+# Every 5 s while flying, one health line per drone:
+#   drone 1 [OPEN] camera 9.6 fps, inferred 9.2 fps, pose 50 Hz, best person 0.78 ...
+# camera ~8-10, inferred ~= camera, pose ~50. A WARN line (DROPPED no-pose,
+# NO CAMERA FRAMES) names the drone and the broken link.
+# Both survey nodes exit by themselves after VERIFY; Ctrl-C the launch after.
 
-ros2 run perception hazard_map --area 0,30,0,60 --truth 15,15
+# Swarm map: every drone's track, shifted into drone 0's frame, one truth per band.
+ros2 run perception hazard_map --area 0,30,0,60 --truth "15,15;15,45"
 
 # ── Terminal 3 ─ optional, one viewer per drone ──────────────────────────
 cd ~/px4_ros_ws && source install/setup.bash
 ros2 run rqt_image_view rqt_image_view /detection/image_annotated_0
 # and in another: /detection/image_annotated_1
 ```
+
+**Every `gz` command needs `GZ_IP=127.0.0.1`, and so does every standalone PX4
+instance.** On this machine gz-transport *discovers* topics without it but does
+not *deliver* data — the distinction section 3 of `check_system.sh` measures
+separately. `start_px4_swarm.sh` sets it for you now; before it did, drone 1
+booted with no accelerometer, refused to arm, and its `/px4_1/fmu/out/...`
+topics were listed but silent for three runs straight. Same root cause as the
+camera bug in `docs/CAMERA_DIAGNOSTIC.md`. Measured 21 Sep: `gz topic -l`
+returns 36 topics bare and 51 with `GZ_IP=127.0.0.1`.
 
 **`num_drones`, `y_min` and `y_max` must match in all three places** —
 `start_px4_swarm.sh`, `add_swarm_targets.sh`, and `swarm_mission.launch.py`.
@@ -260,6 +287,74 @@ Keep the **band height** at 30 m as you add drones (so `Y_MAX = 30 × N`) rather
 than subdividing a fixed area. At 10 m altitude lane spacing is ~16.6 m, so a
 band much narrower than that gives a drone a single pass with nothing to divide
 — the swarm stops demonstrating anything (`docs/SWARM_PLAN.md` §4).
+
+### 5c. Every knob, and what it costs you
+
+**Terminal 1 — `tools/start_px4_swarm.sh`** (environment variables, before `bash`)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `NUM_DRONES` | `2` | PX4 instances. **Must match the launch file.** |
+| `Y_MIN` / `Y_MAX` | `0` / `60` | Total east extent. Each drone spawns at `Y_MIN + i·band_h`. **Must match.** |
+| `RTL_ALT_BASE` | `30` | Drone 0's return altitude (m). |
+| `RTL_ALT_STEP` | `5` | Added per instance, so simultaneous RTLs don't converge. |
+| `PX4_HOME_LAT/LON/ALT` | IITGN | Sim home. Changes the GeoJSON's real-world position. |
+| *(first argument)* | `gz_x500_mono_cam_down` | Airframe. The `gz_` prefix is required here and **absent** in the launch file's `model:=`. |
+
+**Terminal 2 — `tools/add_swarm_targets.sh`** (environment variables)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `NUM_DRONES`, `Y_MIN`, `Y_MAX` | `2`, `0`, `60` | Band math. **Must match the other two.** |
+| `X_MIN` / `X_MAX` | `0` / `30` | Only used to place targets at the north midpoint. |
+| `NORTH` | midpoint of X | Where along the lane every target sits. |
+| `PREFIX` | `swarm_target` | Model name prefix in Gazebo. |
+| `TARGET_MODEL` | Fuel "Standing person" | Swap for a different Fuel model. |
+
+**Terminal 2 — `ros2 launch survey swarm_mission.launch.py`** (`arg:=value`)
+
+*Area and flight*
+
+| Argument | Default | Notes |
+|---|---|---|
+| `num_drones` | `2` | **Must match Terminal 1.** |
+| `x_min` / `x_max` | `0.0` / `30.0` | North extent — the lane length. |
+| `y_min` / `y_max` | `0.0` / `60.0` | East extent, split into bands. **Must match.** |
+| `altitude` | `10.0` | **The governing parameter.** Above ~11.2 m at 1280 px the target falls under the 24 px detection floor and you find nothing. |
+| `lane_spacing` | `0.0` | `0.0` derives it from the camera footprint. Only override to force gaps or overlap. |
+| `sidelap` | `0.3` | Fraction of overlap between lanes. Higher = safer coverage, longer flight. |
+| `lookahead_m` | `4.0` | Ground-speed cap ≈ `0.95 × this`. Geotag error scales with speed — 3.8 m/s gives ~1 m, 9.2 m/s gave ~4 m. `0.0` = flat out. |
+| `yaw_mode` | `course` | `course` faces direction of travel; `fixed` locks to `fixed_yaw_deg`; `hold` doesn't command yaw. |
+| `fixed_yaw_deg` | `0.0` | Degrees from North. Only read when `yaw_mode:=fixed`. |
+| `yaw_deadzone_m` | `1.0` | Inside this radius the bearing is numerically meaningless, so the last yaw is held. |
+| `rtl_on_complete` | `true` | Return to launch after the last waypoint. |
+| `survey_delay` | `8.0` | Seconds before the survey nodes start, so the detector is subscribed first. |
+
+*Detection*
+
+| Argument | Default | Notes |
+|---|---|---|
+| `weights` | `yolov8n.pt` | COCO stand-in. Point at `~/runs/.../best.pt` for trained landmine weights. |
+| `classes` | `person` | Pushed into YOLO, not filtered afterwards. |
+| `conf` | `0.65` | Pooled over four flights, false positives never exceeded 0.57 and real hits never fell below 0.77. Don't lower it without re-measuring. |
+| `imgsz` | `1280` | **Must match the camera's capture width** or ultralytics downscales the detail straight back out. |
+| `pose_lag_s` | `0.25` | Frame-to-pose time matching. This is what took geotag error from 5.5 m to 0.75 m. |
+| `max_alt_m` | `40.0` | Ignore detections above this — stops RTL climb-out logging phantom hazards. |
+| `require_gate` | `true` | Only geotag during actual survey lanes, not climb or RTL. |
+
+*Rendering* — `ros2 run perception hazard_map`
+
+| Flag | Notes |
+|---|---|
+| `--area x_min,x_max,y_min,y_max` | Draw the surveyed box. |
+| `--truth N,E` | One ground-truth point; prints the error to the nearest detection. |
+| `--classes`, `--min-conf`, `--max-alt` | Filter what gets plotted. |
+| `--track`, `--hazards`, `--out`, `--title` | Override the auto-picked files. |
+
+**The three that must agree:** `num_drones`, `y_min`, `y_max` appear in all three
+commands and are computed independently by each. Disagree on any one and the
+drones fly bands that do not contain the targets — which looks exactly like a
+broken detector.
 
 ---
 

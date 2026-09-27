@@ -86,30 +86,23 @@ echo
 # Prevents "port 8888 already in use" (agent) and "PX4 server already
 # running for instance 0" (SITL) when a prior launch didn't shut down.
 cleanup_stale() {
-    local found=0
-    for pat in MicroXRCEAgent "bin/px4 " "px4_sitl" "gz sim" "gz-sim"; do
-        if pgrep -f "$pat" >/dev/null 2>&1; then found=1; fi
-    done
-    if [ "$found" -eq 1 ]; then
-        echo "Clearing stale sim processes from a previous run..."
-        pkill -f MicroXRCEAgent 2>/dev/null
-        pkill -x px4            2>/dev/null
-        pkill -f "px4_sitl"     2>/dev/null
-        pkill -f "gz sim"       2>/dev/null
-        pkill -f "gz-sim"       2>/dev/null
-        sleep 2
-    fi
+    # Delegated to tools/stop_sim.sh: it kills by process (tmux teardown leaves
+    # PX4 and Gazebo running), includes a swarm left by start_px4_swarm.sh, and
+    # never kills its own ancestors. The old `pkill -f px4_sitl` here also hit
+    # any shell or `tail -f .../px4_sitl.log` whose command line contained it.
+    bash "$ROS_WS/tools/stop_sim.sh" | sed 's/^/cleanup: /'
 }
-cleanup_stale
 
 # Guard against being run *inside* an existing tmux session (nested attach
-# fails). Re-run this script from a plain terminal instead.
+# fails). Re-run this script from a plain terminal instead. Checked BEFORE
+# cleanup, which closes the px4_sim/px4_swarm sessions - possibly our own pane.
 if [ -n "${TMUX:-}" ]; then
     echo "You're inside a tmux session already."
-    echo "Detach first (Ctrl-b d) or run 'tmux kill-server', then launch this"
-    echo "script from a normal terminal."
+    echo "Detach first (Ctrl-b d) or run 'bash $ROS_WS/tools/stop_sim.sh', then"
+    echo "launch this script from a normal terminal."
     exit 1
 fi
+cleanup_stale
 
 # ---- tmux path: three real panes, exactly like three terminals ------------
 if command -v tmux >/dev/null 2>&1; then
@@ -168,7 +161,7 @@ if command -v tmux >/dev/null 2>&1; then
     echo "Attaching to tmux session '$SESSION'."
     echo "  Ctrl-b d   → detach (stack keeps running)"
     echo "  tmux attach -t $SESSION   → reattach later"
-    echo "  tmux kill-session -t $SESSION   → stop everything"
+    echo "  bash $ROS_WS/tools/stop_sim.sh   → stop everything (tmux kill alone leaves PX4/Gazebo running)"
     sleep 1
     exec tmux attach -t "$SESSION"
 fi

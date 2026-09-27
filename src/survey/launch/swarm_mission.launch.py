@@ -20,7 +20,7 @@ Then verify the namespace is actually live BEFORE flying anything - this
 project's single most expensive bug was assuming a topic name without
 checking (see NEXT_SESSION.md):
 
-    ros2 topic hz /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort
+    ros2 topic echo /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once
 
 Then:
 
@@ -63,9 +63,11 @@ def _launch_setup(context, *args, **kwargs):
     y_min_g, y_max_g = float(g('y_min')), float(g('y_max'))
     world = g('world')
     model = g('model')
+    if y_max_g <= y_min_g:
+        raise RuntimeError(f"y_max ({y_max_g}) must be greater than y_min ({y_min_g})")
     band_h = (y_max_g - y_min_g) / num_drones
 
-    cam_topics, pose_ns, gate_topics, offsets, annot_topics = [], [], [], [], []
+    cam_topics, pose_ns, gate_topics, offsets = [], [], [], []
     survey_includes = []
     for i in range(num_drones):
         east_offset = y_min_g + i * band_h
@@ -77,13 +79,14 @@ def _launch_setup(context, *args, **kwargs):
         gate_topics.append(gate_topic)
         cam_topics.append(cam_topic)
         offsets.append(f'0,{east_offset}')
-        # One annotated stream PER DRONE. Without this the detector's
-        # annotated_topics falls back to the singular default, which _split()
-        # broadcasts to every drone - so all N publish onto
-        # /detection/image_annotated and rqt_image_view shows their frames
-        # interleaved, flickering between viewpoints with no way to tell which
-        # drone saw what. Harmless to the hazard CSV, ruinous in a demo.
-        annot_topics.append(f'/detection/image_annotated_{i}')
+        # NOTE: do NOT pass annotated_topics from here. detector_node.py already
+        # appends a per-drone suffix itself (_per_drone_topic: base + '_i'
+        # whenever n > 1), so the singular default /detection/image_annotated
+        # becomes /detection/image_annotated_0 and _1 on its own. Passing
+        # '/detection/image_annotated_{i}' in as the BASE made it suffix twice,
+        # and the 21 Sep run published on /detection/image_annotated_0_0 and
+        # _1_1 - topics no viewer was watching. The problem this was meant to
+        # solve did not exist.
 
         survey = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
@@ -99,6 +102,8 @@ def _launch_setup(context, *args, **kwargs):
                 'lane_spacing': g('lane_spacing'),
                 'sidelap': g('sidelap'),
                 'yaw_mode': g('yaw_mode'),
+                'fixed_yaw_deg': g('fixed_yaw_deg'),
+                'yaw_deadzone_m': g('yaw_deadzone_m'),
                 'rtl_on_complete': g('rtl_on_complete'),
                 'lookahead_m': g('lookahead_m'),
             }.items(),
@@ -119,7 +124,6 @@ def _launch_setup(context, *args, **kwargs):
             'image_topics': ';'.join(cam_topics),
             'pose_namespaces': ';'.join(pose_ns),
             'gate_topics': ';'.join(gate_topics),
-            'annotated_topics': ';'.join(annot_topics),
             'home_offsets': ';'.join(offsets),
         }.items(),
     )
@@ -127,7 +131,7 @@ def _launch_setup(context, *args, **kwargs):
     # Perception first (bridges + shared detector must be subscribed before
     # any drone starts flying, same reasoning as mission.launch.py), all N
     # survey nodes delayed together so their lanes are watched from lane 1.
-    delayed_survey = TimerAction(period=g('survey_delay'), actions=survey_includes)
+    delayed_survey = TimerAction(period=float(g('survey_delay')), actions=survey_includes)
 
     return [perception, delayed_survey]
 
@@ -154,7 +158,14 @@ def generate_launch_description():
         DeclareLaunchArgument('altitude', default_value='10.0'),
         DeclareLaunchArgument('lane_spacing', default_value='0.0'),
         DeclareLaunchArgument('sidelap', default_value='0.3'),
-        DeclareLaunchArgument('yaw_mode', default_value='course'),
+        DeclareLaunchArgument(
+            'yaw_mode', default_value='course',
+            description="course = face direction of travel; fixed = locked to "
+                        "fixed_yaw_deg; hold = don't command yaw at all"),
+        # Declared by survey_node.py but previously forwarded by no launch file,
+        # so they could not be set from the command line at all.
+        DeclareLaunchArgument('fixed_yaw_deg', default_value='0.0'),
+        DeclareLaunchArgument('yaw_deadzone_m', default_value='1.0'),
         DeclareLaunchArgument('rtl_on_complete', default_value='true'),
         DeclareLaunchArgument('lookahead_m', default_value='4.0'),
         # --- detection (one shared detector for all drones) ---

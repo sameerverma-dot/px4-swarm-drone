@@ -50,6 +50,7 @@ import time
 from enum import Enum
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
@@ -218,6 +219,7 @@ class SurveyNode(Node):
         self.pos_valid = False
         self.status = VehicleStatus()
         self.phase = Phase.INIT
+        self.done = False        # set by finish(); main() exits on it
         self.counter = 0
         self.last_engage_t = 0.0
         self.wp = self.build_waypoints()
@@ -229,7 +231,13 @@ class SurveyNode(Node):
         self.returned = False
         self.detecting = None            # last value published on detect_topic
         self.reached_alt = False         # latched once we first reach survey altitude
-        self.cmd_yaw = self.fixed_yaw    # last yaw actually commanded (rad, NED)
+        # Last yaw actually commanded in 'course' mode (rad, NED). Seeded NaN,
+        # not fixed_yaw: before the first real bearing is computed there is no
+        # course to face, and seeding it with fixed_yaw (default 0.0) meant
+        # 'course' mode opened by commanding North - a heading nobody asked for.
+        # NaN means "don't control yaw yet", so the drone keeps whatever heading
+        # it has until an actual course exists. 'fixed' mode does not use this.
+        self.cmd_yaw = float('nan')
 
         self.get_logger().info(
             f"Survey ns='{self.namespace or '(none)'}' x[{self.x_min},{self.x_max}] "
@@ -297,7 +305,14 @@ class SurveyNode(Node):
         m.timestamp = self.us()
         self.pub_ocm.publish(m)
 
-    def send_sp(self, x, y, z, yaw=0.0):
+    def send_sp(self, x, y, z, yaw=float('nan')):
+        # The default is NaN, NOT 0.0, and that is the whole point. PX4 reads a
+        # NaN yaw setpoint as "don't control yaw"; it reads 0.0 as "face North".
+        # This function used to default to 0.0, so any caller that forgot the
+        # argument silently commanded North - which is exactly how the drone
+        # ended up crabbing sideways down every south-bound lane while the code
+        # looked correct. Defaulting to NaN makes a forgotten argument harmless
+        # instead of wrong.
         m = TrajectorySetpoint()
         m.position = [float(x), float(y), float(z)]
         m.velocity = [float('nan')] * 3
@@ -333,10 +348,12 @@ class SurveyNode(Node):
                 self.cmd_yaw = math.atan2(dy, dx)
         # Inside the deadzone (or before we have a position) keep the last
         # command, so the nose does not spin while the drone climbs or settles
-        # onto a waypoint.
+        # onto a waypoint. Until a bearing has ever been computed cmd_yaw is
+        # still NaN, which PX4 reads as "leave yaw alone" - the correct answer
+        # when there is no course yet, and not the same as facing North.
         return self.cmd_yaw
 
-    def send_sp_limited(self, x, y, z, yaw=0.0):
+    def send_sp_limited(self, x, y, z, yaw=float('nan')):
         """Position setpoint with a speed cap.
 
         Instead of handing PX4 the far end of the lane (which it flies at
@@ -537,16 +554,22 @@ class SurveyNode(Node):
             self.timer.cancel()
         except Exception:  # noqa: BLE001
             pass
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Do NOT call rclpy.shutdown() here. finish() runs inside the tick()
+        # timer callback, and in Humble rclpy.shutdown() shuts down the global
+        # executor, which blocks until in-flight callbacks finish - i.e. until
+        # this one returns. It deadlocked every run after VERIFY: the node never
+        # exited, `ros2 launch` never ended, and SIGTERM could not stop it
+        # either. main() sees this flag and shuts down outside the callback.
+        self.done = True
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = SurveyNode()
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, SystemExit):
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except (KeyboardInterrupt, SystemExit, ExternalShutdownException):
         pass
     finally:
         try:

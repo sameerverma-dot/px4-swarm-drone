@@ -71,10 +71,12 @@ raw (north, east) is meaningless next to drone 0's unless shifted by
 however far drone 1 was spawned from drone 0's home.
 """
 
+import array
 import bisect
 import csv
 import math
 import os
+import threading
 import time
 from collections import deque
 from functools import partial
@@ -82,8 +84,10 @@ from functools import partial
 import numpy as np
 
 import rclpy
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data, QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
@@ -111,7 +115,16 @@ class DetectorNode(Node):
         self.declare_parameter('hfov_rad', 1.74)            # from mono_cam SDF
         self.declare_parameter('publish_annotated', True)
         self.declare_parameter('hazard_csv', '~/maps/hazard_points.csv')
-        self.declare_parameter('min_sep_m', 2.0)            # dedup radius (metres)
+        # Dedup radius. Two detections closer than this are treated as one
+        # object. The right value is ~2x the geolocation sigma: merging inside
+        # your own error bars is correct, merging beyond them loses real targets.
+        #
+        # At 640 px / 5 m the error was ~0.75 m and 2.0 was comfortable. At
+        # 1280 px / 10 m the 8 Sep flight put three hits on ONE person at
+        # 0.78 / 2.44 / 3.08 m from truth (RMS 2.31 m), spaced 2.3-3.9 m apart -
+        # all just outside 2.0, so one person was logged as THREE hazards.
+        # 4.5 ~= 2 x 2.31. Lower it if you fly lower/slower and re-measure.
+        self.declare_parameter('min_sep_m', 4.5)            # dedup radius (metres)
         self.declare_parameter('classes', '')               # '' = all; else CSV of names to keep
         self.declare_parameter('device', '')                # '' = auto (cuda if available), else 'cuda:0'/'cpu'
         # Inference size. Camera capture is 1280x960 (mono_cam SDF) - imgsz must
@@ -141,6 +154,11 @@ class DetectorNode(Node):
         self.declare_parameter('gate_topics', '')
         self.declare_parameter('annotated_topics', '')
         self.declare_parameter('home_offsets', '')
+        # --- diagnostics ---
+        # YOLO runs at this floor so near-misses are visible in the stats line;
+        # only detections >= conf are drawn or recorded.
+        self.declare_parameter('diag_conf', 0.25)
+        self.declare_parameter('stats_period_s', 5.0)
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -162,6 +180,8 @@ class DetectorNode(Node):
         self.geo_flip_r = bool(gp('geo_flip_right').value)
         keep = str(gp('classes').value).strip()
         self.keep = set(s.strip() for s in keep.split(',') if s.strip()) if keep else None
+        self.keep_label = '/'.join(sorted(self.keep)) if self.keep else 'detection'
+        self.diag_conf = float(gp('diag_conf').value)
 
         # ---- device selection (explicit, and logged) ----
         dev = str(gp('device').value).strip()
@@ -255,6 +275,7 @@ class DetectorNode(Node):
                 'gate': not self.require_gate,
                 'gate_seen': False,
                 'pub_annot': None,
+                'st': self._new_stats(),
             })
         if n > 1:
             self.get_logger().info(
@@ -294,10 +315,26 @@ class DetectorNode(Node):
         img_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
             history=HistoryPolicy.KEEP_LAST, depth=1)
+
+        # Two callback groups on a MultiThreadedExecutor (see main()). On a
+        # single-threaded executor no pose callback can run while YOLO is busy,
+        # so at imgsz 1280 the "50 Hz" pose ring buffer was measured filling at
+        # 1 Hz (27 Sep, 2 drones). Frames then either matched a pose up to
+        # ~0.5 s off (≈1.9 m at 3.8 m/s - geotag scatter) or found none within
+        # 0.5 s and were DROPPED: drone 1's conf-0.65 hit was lost exactly that
+        # way. Images stay mutually exclusive (one model, one GPU); pose, gate
+        # and stats run alongside them.
+        self.cb_images = MutuallyExclusiveCallbackGroup()   # receive + stash only
+        self.cb_infer = MutuallyExclusiveCallbackGroup()    # the one YOLO worker
+        self.cb_state = MutuallyExclusiveCallbackGroup()    # pose, gate, stats
+        self.pose_lock = threading.Lock()
+        self.frame_lock = threading.Lock()
+        self._rr = 0
         for i, d in enumerate(self.drones):
+            d['latest'] = None
             self.create_subscription(
                 Image, d['image_topic'], partial(self.on_image, drone_idx=i),
-                img_qos)
+                img_qos, callback_group=self.cb_images)
             # PX4 publishes VehicleLocalPosition on the versioned topic
             # (.../vehicle_local_position_v1) on this build; other builds use the
             # unversioned name. Subscribe to both. Without this the pose buffer
@@ -305,9 +342,11 @@ class DetectorNode(Node):
             ns = d['pose_ns']
             for t in (f'{ns}/fmu/out/vehicle_local_position', f'{ns}/fmu/out/vehicle_local_position_v1'):
                 self.create_subscription(
-                    VehicleLocalPosition, t, partial(self.on_pos, drone_idx=i), px4_qos)
+                    VehicleLocalPosition, t, partial(self.on_pos, drone_idx=i), px4_qos,
+                    callback_group=self.cb_state)
             self.create_subscription(
-                Bool, d['gate_topic'], partial(self.on_gate, drone_idx=i), gate_qos)
+                Bool, d['gate_topic'], partial(self.on_gate, drone_idx=i), gate_qos,
+                callback_group=self.cb_state)
             if self.publish_annotated:
                 d['pub_annot'] = self.create_publisher(Image, d['annotated_topic'], 1)
 
@@ -317,7 +356,6 @@ class DetectorNode(Node):
                 csv.writer(f).writerow(
                     ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m', 'drone'])
 
-        self.frame_count = 0
         for i, d in enumerate(self.drones):
             self.get_logger().info(
                 f"detector up: drone {i} image='{d['image_topic']}' -> "
@@ -325,6 +363,54 @@ class DetectorNode(Node):
         self.get_logger().info(
             f"require_gate={self.require_gate} | pose_lag={self.pose_lag}s | "
             f"alt window [{self.min_alt}, {self.max_alt}] m | imgsz={self.imgsz}")
+
+        # Per-drone health line while any gate is open. A shared detector can
+        # starve one drone, and a target seen just under `conf` never produces a
+        # HAZARD line - both looked identical ("drone 1 found nothing") until
+        # this existed.
+        self.stats_period = max(1.0, float(gp('stats_period_s').value))
+        self._stats_t0 = time.time()
+        self.create_timer(self.stats_period, self.log_stats, callback_group=self.cb_state)
+        # Busy-ish poll: a tick with nothing waiting is a few microseconds, and a
+        # tick that finds a frame runs inference back-to-back.
+        self.create_timer(0.005, self.infer_tick, callback_group=self.cb_infer)
+
+    @staticmethod
+    def _new_stats():
+        return {'rx': 0, 'inferred': 0, 'pose': 0, 'best': 0.0, 'best_below': 0.0,
+                'hits': 0, 'no_pose': 0, 'alt_window': 0,
+                't_frame': 0.0, 't_yolo': 0.0, 't_preprocess': 0.0,
+                't_inference': 0.0, 't_postprocess': 0.0}
+
+    def log_stats(self):
+        now = time.time()
+        dt = max(now - self._stats_t0, 1e-6)
+        self._stats_t0 = now
+        if not any(d['gate'] and d['gate_seen'] for d in self.drones) and self.require_gate:
+            for d in self.drones:
+                d['st'] = self._new_stats()
+            return
+        for i, d in enumerate(self.drones):
+            st = d['st']
+            msg = (f"drone {i} [{'OPEN' if d['gate'] else 'closed'}] "
+                   f"camera {st['rx'] / dt:.1f} fps, inferred {st['inferred'] / dt:.1f} fps, "
+                   f"pose {st['pose'] / dt:.0f} Hz, "
+                   f"best {self.keep_label} {st['best']:.2f} "
+                   f"(below-threshold best {st['best_below']:.2f}), hits {st['hits']}")
+            if st['inferred']:
+                n = st['inferred']
+                msg += (f" | ms/frame: total {1000 * st['t_frame'] / n:.0f}, yolo "
+                        f"{1000 * st['t_yolo'] / n:.0f} (pre {1000 * st['t_preprocess'] / n:.0f}"
+                        f" / gpu {1000 * st['t_inference'] / n:.0f}"
+                        f" / post {1000 * st['t_postprocess'] / n:.0f})")
+            if st['no_pose'] or st['alt_window']:
+                msg += (f", DROPPED {st['no_pose']} no-pose / "
+                        f"{st['alt_window']} outside alt window")
+            if st['no_pose'] or (d['gate'] and st['rx'] == 0):
+                self.get_logger().warn(msg + ("  <- NO CAMERA FRAMES" if st['rx'] == 0 else ""))
+            else:
+                self.get_logger().info(msg)
+            d['st'] = self._new_stats()
 
     # ---------- helpers ----------
     def _split(self, value, expect=None, default=None):
@@ -371,8 +457,10 @@ class DetectorNode(Node):
         if not (msg.xy_valid and msg.z_valid):
             return
         d = self.drones[drone_idx]
-        d['pose_t'].append(time.time())
-        d['pose_v'].append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
+        d['st']['pose'] += 1
+        with self.pose_lock:    # pose_at() reads these from the image thread
+            d['pose_t'].append(time.time())
+            d['pose_v'].append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
 
     def on_gate(self, msg, drone_idx=0):
         d = self.drones[drone_idx]
@@ -387,15 +475,16 @@ class DetectorNode(Node):
         None if that drone's buffer is empty or the closest sample is more
         than 0.5 s away (stale/no telemetry)."""
         d = self.drones[drone_idx]
-        ts = d['pose_t']
-        if not ts:
-            return None
-        i = bisect.bisect_left(ts, t)
-        cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
-        j = min(cand, key=lambda k: abs(ts[k] - t))
-        if abs(ts[j] - t) > 0.5:
-            return None
-        return d['pose_v'][j]
+        with self.pose_lock:
+            ts = d['pose_t']
+            if not ts:
+                return None
+            i = bisect.bisect_left(ts, t)
+            cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
+            j = min(cand, key=lambda k: abs(ts[k] - t))
+            if abs(ts[j] - t) > 0.5:
+                return None
+            return d['pose_v'][j]
 
     def img_to_np(self, msg):
         """sensor_msgs/Image -> HxWx3 BGR numpy (handles rgb8/bgr8).
@@ -421,7 +510,12 @@ class DetectorNode(Node):
         m.encoding = 'bgr8'
         m.is_bigendian = 0
         m.step = frame.shape[1] * 3
-        m.data = frame.tobytes()
+        # array('B'), NOT bytes: rclpy's generated setter stores an array('B')
+        # as-is, but validates any other sequence element by element in Python
+        # - 296 ms for one 1280x960 frame vs 5 ms (measured 27 Sep). That was
+        # ~85% of every frame's cost and the real cause of the old "~2 Hz, not
+        # YOLO" pipeline ceiling (PROGRESS.md 5.1).
+        m.data = array.array('B', frame.tobytes())
         return m
 
     def project_to_ground(self, u, v, img_w, img_h, pose):
@@ -472,11 +566,37 @@ class DetectorNode(Node):
         return True
 
     def on_image(self, msg, drone_idx=0):
-        # Timestamp FIRST: everything after this (decode, inference) is latency we
-        # must not attribute to the drone's position.
+        """Stash only. Timestamped on ARRIVAL: everything after this (queueing
+        behind another drone's inference, decode, inference) is latency we must
+        not attribute to the drone's position. Newer frames overwrite older
+        ones, so the worker always gets the freshest frame per drone."""
         t_rx = time.time()
         d = self.drones[drone_idx]
+        d['st']['rx'] += 1
+        with self.frame_lock:
+            d['latest'] = (msg, t_rx)
 
+    def infer_tick(self):
+        """Serve ONE waiting frame, round-robin across drones.
+
+        With image callbacks in one mutually-exclusive group, the executor
+        handed every free slot to drone 0's subscription (created first, and it
+        always had a fresh frame): drone 1 was measured at 0 fps. Explicit
+        round-robin gives each of N drones 1/N of the detector."""
+        n = len(self.drones)
+        for k in range(n):
+            idx = (self._rr + k) % n
+            d = self.drones[idx]
+            with self.frame_lock:
+                item, d['latest'] = d['latest'], None
+            if item is not None:
+                self._rr = (idx + 1) % n
+                self.process_frame(item[0], item[1], idx)
+                return
+
+    def process_frame(self, msg, t_rx, drone_idx):
+        t_start = time.time()
+        d = self.drones[drone_idx]
         frame = self.img_to_np(msg)
         if frame is None:
             return
@@ -488,29 +608,25 @@ class DetectorNode(Node):
             if self.publish_annotated and d['pub_annot'] is not None:
                 d['pub_annot'].publish(self.np_to_img(frame, msg.header))
             return
-        self.frame_count += 1
-        if self.frame_count % 50 == 0:
-            now = time.time()
-            prev = getattr(self, '_t_last', None)
-            self._t_last = now
-            if prev:
-                self.get_logger().info(
-                    f"{50.0 / max(now - prev, 1e-6):.1f} FPS through detector "
-                    f"(device={self.device})")
+        st = d['st']
+        st['inferred'] += 1
         # NOTE: 'half' is deprecated in ultralytics >=8.4 (warns once per frame and
         # floods the log). Weights are already moved to fp16 on GPU at load time,
         # so we simply don't pass it here.
-        results = self.model(frame, conf=self.conf, imgsz=self.imgsz,
+        # Inference runs at the DIAGNOSTIC floor, not at `conf`, so a target seen
+        # at 0.55 against a 0.65 threshold shows up in the stats line instead of
+        # vanishing. Only boxes >= conf are drawn or recorded.
+        t0 = time.time()
+        results = self.model(frame, conf=min(self.conf, self.diag_conf), imgsz=self.imgsz,
                              device=self.device, classes=self.keep_ids,
                              verbose=False)
         r = results[0]
+        st['t_yolo'] += time.time() - t0
+        for k in ('preprocess', 'inference', 'postprocess'):
+            st['t_' + k] += (getattr(r, 'speed', None) or {}).get(k, 0.0) / 1000.0
         img_h, img_w = frame.shape[:2]
 
         pose = self.pose_at(t_rx - self.pose_lag, drone_idx=drone_idx)
-        if pose is None and len(r.boxes) and self.frame_count % 50 == 0:
-            self.get_logger().warn(
-                f"drone {drone_idx}: detections but no pose within 0.5 s of the "
-                f"frame - is its PX4 telemetry flowing? (geotagging skipped)")
 
         for box in r.boxes:
             cls_id = int(box.cls[0])
@@ -521,6 +637,10 @@ class DetectorNode(Node):
             if self.keep is not None and name not in self.keep:
                 continue
             conf = float(box.conf[0])
+            if conf < self.conf:
+                st['best_below'] = max(st['best_below'], conf)
+                continue
+            st['best'] = max(st['best'], conf)
             x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
             u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
@@ -530,25 +650,34 @@ class DetectorNode(Node):
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
 
             if pose is None:
+                st['no_pose'] += 1
                 continue
             g = self.project_to_ground(u, v, img_w, img_h, pose)
-            if g is not None:
-                # Fold this drone's own local-NED detection into the shared
-                # map frame (drone 0's home) before recording it - see the
-                # home_offsets note in the module docstring.
-                north = g[0] + d['offset_n']
-                east = g[1] + d['offset_e']
-                self.record_hazard(north, east, name, conf, -pose[2], drone_idx=drone_idx)
+            if g is None:
+                st['alt_window'] += 1
+                continue
+            # Fold this drone's own local-NED detection into the shared map
+            # frame (drone 0's home) before recording it - see the
+            # home_offsets note in the module docstring.
+            north = g[0] + d['offset_n']
+            east = g[1] + d['offset_e']
+            if self.record_hazard(north, east, name, conf, -pose[2], drone_idx=drone_idx):
+                st['hits'] += 1
 
         if self.publish_annotated and d['pub_annot'] is not None:
             d['pub_annot'].publish(self.np_to_img(frame, msg.header))
+        st['t_frame'] += time.time() - t_start
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = DetectorNode()
+    # Multi-threaded so the pose/gate callback group keeps running while the
+    # image group is inside YOLO - see the callback-group comment in __init__.
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
