@@ -1,11 +1,11 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 12 Sep 2026 (**the 2-drone swarm is flight-verified** — both
-drones flew their own band, both logged VERIFY PASS, and drone 1's detection
-came back in drone 0's frame within 1.7 m, which is `home_offsets` proven
-rather than assumed. See section 9. Section 8's "NOT flight-verified" caveat is
-now discharged.)_
+_Last updated: 27 Sep 2026 (**the 2-drone swarm is reliable, not just possible**:
+two consecutive flights with BOTH drones detecting their own target, 0.74-1.21 m
+from truth. Six bugs fixed first - drone 1's hits were being silently dropped, the
+detector spent 85 % of each frame on one slow rclpy assignment, and every mission
+deadlocked after VERIFY. Section 10.)_
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -17,8 +17,9 @@ A single drone autonomously surveys a specified area and returns, via two
 independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
 ### Where this actually stands
 
-**The 2-DRONE SWARM is flight-verified** as of 12 Sep (section 9), which closes
-the headline software requirement. The single-drone loop below remains the
+**The 2-DRONE SWARM is complete** as of 21 Sep (section 9.5): two drones, two
+bands, a detection in each, both folded into one shared frame. That closes the
+headline software requirement. The single-drone loop below remains the
 accuracy baseline everything is measured against.
 
 Remaining on the software side: a third drone, a multi-target map renderer, and
@@ -72,17 +73,19 @@ there is still only one drone.
 | Downward camera model in sim (`x500_mono_cam_down`) | ✅ Model + airframe confirmed |
 | Gazebo camera → ROS 2 bridge (`ros_gz_bridge`) | ✅ Configured & launches |
 | YOLO detector node (`perception`) | ✅ **Working on GPU** (cuda:0, RTX 4060, fp16, imgsz 640) |
-| Pipeline throughput | ⚠️ ~2 Hz — bottleneck is upstream of YOLO (see 5.1) |
+| Pipeline throughput | ✅ every frame inferred, ~8-10 fps **per drone** with 2 drones — the "~2 Hz" cause found and fixed (10.3) |
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
 | Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
 | Camera capture 1280x960 + imgsz to match | ✅ Built & live-verified (section 8.1) |
-| **Multi-drone swarm (2–5)** | ✅ **2 drones flight-verified 12 Sep — both VERIFY PASS, cross-frame geotag 1.70 m (section 9).** 🟡 3+ untried; both bands not yet targeted in one run |
+| **Multi-drone swarm (2–5)** | ✅ **2 drones reliable 27 Sep — two consecutive flights, BOTH drones detect every time, 0.74-1.21 m, nodes exit cleanly (section 10.6).** 🟡 3+ untried |
 | Geotag accuracy vs known target | ✅ 0.75 m |
 | False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
 | Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
 | Target spawner (`tools/add_target.sh`) | ✅ GUI-inserted models die on restart |
-| System self-test (`tools/check_system.sh`) | ✅ six layers, PASS/FAIL |
+| System self-test (`tools/check_system.sh`) | ✅ six layers, PASS/FAIL — auto-detects the PX4 instances and probes **every** drone (10.5) |
+| Teardown (`tools/stop_sim.sh`) | ✅ kills by process and verifies; `tmux kill-server` alone does not (10.5) |
+| Per-band target spawner (`tools/add_swarm_targets.sh`) | ✅ one target per drone band |
 
 ---
 
@@ -192,7 +195,13 @@ were lost chasing this. **A loud warning is not automatically the cause.**
 **Performance note:** ~2 Hz is YOLO on CPU at 1280×960. For a smoother demo drop
 `Tools/simulation/gz/models/mono_cam/model.sdf` to 640×480 and `update_rate` 10.
 
-### 5.1 Open item — pipeline runs at ~2 Hz (bottleneck is NOT YOLO)
+### 5.1 ~~Open item~~ SOLVED 27 Sep — pipeline runs at ~2 Hz (bottleneck is NOT YOLO)
+
+> **Resolved in section 10.3.** The right half of this section's conclusion
+> (not YOLO) was correct; the suspects below were not. It was never transport:
+> `np_to_img()` assigned `bytes` to `Image.data`, which rclpy validates element
+> by element in Python - 296 ms per 1280x960 frame against 5 ms for an
+> `array('B')`. The history is kept below as a record of the reasoning.
 
 **Measured:** `ros2 topic hz /detection/image_annotated` → ~2 Hz, both on CPU
 **and** after moving inference to the GPU. Startup confirms the GPU is really in
@@ -411,7 +420,7 @@ conflict at the end.
 
 ---
 
-## 9. The 2-drone swarm, flight-verified (12 Sep)
+## 9. The 2-drone swarm — flight-verified 16 Sep, completed 21 Sep
 
 Section 8 built the swarm and verified the wiring. This section is the flight.
 
@@ -457,7 +466,7 @@ offset is a constant.
 
 ### 9.2 What this run did NOT prove, and the fix
 
-**Only drone 0's band had ever had a target.** This run was flown with a single
+**(CLOSED 21 Sep - see 9.5.)** Only drone 0's band had ever had a target. This run was flown with a single
 person spawned at E=45, so `hazard_points.csv` gained exactly one row for the
 whole sortie, and drone 0 flew a clean, verified, completely empty survey.
 
@@ -491,7 +500,67 @@ Re-fly 9.1 with it before calling the 2-drone case closed. **Expect 2 rows in
   "expected" is not "verified", and this project has a standing rule about the
   difference.
 
-### 9.4 Where the software deliverable stands
+
+### 9.5 CLOSED — both bands detected, 21 Sep
+
+Section 9.2 said the 16 Sep flight had only ever put a target in one band, so
+half the swarm was untested. That is now closed. With `tools/add_swarm_targets.sh`
+placing one person per band:
+
+```
+HAZARD #1: person conf=0.82 at N=14.1 E=15.6 (alt 10.0m, drone 0)
+HAZARD #2: person conf=0.67 at N=14.5 E=44.9 (alt 10.0m, drone 1)
+survey_node_0: VERIFY PASS | waypoints 7/7 (OK) | returned=True | 3030 samples
+survey_node_1: VERIFY PASS | waypoints 7/7 (OK) | returned=True | 3105 samples
+```
+
+| drone | truth (N,E) | reported | error |
+|---|---|---|---|
+| 0 | 15.0, 15.0 | 14.1, 15.6 | **1.08 m** |
+| 1 | 15.0, 45.0 | 14.5, 44.9 | **0.51 m** |
+
+Both drones flew, both detected in their OWN band, and both hits landed in drone
+0's frame. Drone 1's raw observation was local E about 14.9; `home_offsets` added
+the 30 m. Accuracy is at or better than the single-drone 1280 px baseline, so the
+swarm costs nothing in geolocation - expected, since each drone geotags in its
+own frame and the offset is a constant.
+
+### 9.6 The bug that cost 21 Sep: GZ_IP, again
+
+Three consecutive runs had drone 1 boot blind - `No valid data from Accel 0`,
+`barometer 0 missing`, `Found 0 compass`, then `Arming denied: Resolve system
+health failures first` - while `/px4_1/fmu/out/vehicle_local_position_v1` was
+LISTED (the DDS writer existed) and silent (EKF2 never had inputs).
+
+Gazebo was innocent. `gz topic -e` on
+`/world/default/model/x500_mono_cam_down_1/link/base_link/sensor/imu_sensor/imu`
+returned real data at full rate. The sensor published; PX4 did not receive it.
+
+Root cause: `tools/start_px4_swarm.sh` launched the standalone instances without
+`GZ_IP=127.0.0.1`. On this machine gz-transport discovery works without it and
+data delivery does not - exactly the distinction `check_system.sh` has always
+measured in two separate probes ("camera advertised" vs "camera DELIVERING
+frames with GZ_IP=127.0.0.1"), and exactly the bug documented in
+`CAMERA_DIAGNOSTIC.md`. Instance 0 was unaffected because it starts the gz
+server itself. Measured: `gz topic -l` returns 36 topics bare, 51 with GZ_IP.
+
+Fixed by adding `GZ_IP=127.0.0.1` to every standalone instance and to the
+launcher's ROS pane.
+
+**Two process lessons, both expensive:**
+
+1. Four hypotheses were tried before the right one - stale processes, a startup
+   race, a Gazebo spawn defect, transport. Each was consistent with the evidence
+   available at the time and the first three were wrong. What settled it was one
+   measurement (`gz topic -e` on the suspect sensor) that should have been taken
+   first. **Measure the link that is actually suspect before theorising about it.**
+2. `check_system.sh` reported "21 passed, 0 failed - Everything probed is
+   working" while drone 1 was dead. Its telemetry layer only probes `/fmu/out/*`,
+   i.e. instance 0. A self-test that cannot see the swarm cannot protect the
+   swarm. ~~OPEN: make check_system.sh take NUM_DRONES and probe /px4_i/ for
+   each instance.~~ **Done 27 Sep (section 10.5).**
+
+### 9.7 Where the software deliverable stands
 
 The autonomous swarm loop — launch N, split the area, fly concurrently, detect,
 geotag into one shared frame, return, verify — **runs end to end.** That was the
@@ -503,3 +572,140 @@ drone, a multi-target map, and landmine weights in place of the COCO
 
 **Hardware (Track B) is 50 % of the grade and remains at zero.** Nothing in this
 section changes that, and it is now the single largest risk to the project.
+
+---
+
+## 10. The 2-drone swarm made reliable — 27 Sep
+
+Section 9.5 closed the swarm on one flight where drone 1 scored 0.67 against a
+0.65 threshold. The four swarm runs of 26 Sep then logged **zero** drone 1
+detections, while drone 0 hit 3 of 4 - with identical geometry (both drones pass
+1.6 m from their target). This section is the diagnosis and the fixes. Every
+claim below was measured on the running stack, not inferred.
+
+### 10.1 Evidence first: a per-drone health line
+
+The detector could not answer "why did drone 1 find nothing": it logged only
+hits above threshold, and its no-pose warning fired only when a detection
+coincided with every 50th frame - effectively never. It now logs, every 5 s while
+a gate is open:
+
+```
+drone 1 [OPEN] camera 9.6 fps, inferred 9.2 fps, pose 50 Hz, best person 0.78
+        (below-threshold best 0.61), hits 1 | ms/frame: total 27, yolo 14 (...)
+```
+
+YOLO runs at a 0.25 diagnostic floor so near-misses are visible; only boxes
+>= `conf` are drawn or recorded. `DROPPED n no-pose` and `NO CAMERA FRAMES`
+are logged as warnings naming the drone.
+
+### 10.2 Bug: drone 1's hits were silently dropped (pose sampled at 1 Hz)
+
+The first instrumented flight showed drone 1 detect its target at **0.65 - and
+the detection DROPPED, no pose**. Measured: the "50 Hz" pose ring buffer was
+filling at **1 Hz** for both drones. On a single-threaded executor no pose
+callback can run while YOLO is busy, so a frame either matched a pose up to
+~0.5 s off (≈1.9 m at 3.8 m/s - this, not bridge jitter, is the likeliest source
+of the 8 Sep 2-3 m scatter) or found none within 0.5 s and was discarded.
+
+Fix, in two steps because the first one broke something measurable:
+
+1. `MultiThreadedExecutor` with pose/gate/stats in their own callback group and
+   a lock on the pose buffer -> pose 44 Hz. But with both image subscriptions in
+   one mutually-exclusive group, the executor handed every free slot to drone
+   0's subscription (created first, always has a fresh frame): **drone 1 went to
+   0 fps.** The new health line caught it immediately.
+2. Image callbacks now only stash the newest frame per drone, timestamped on
+   arrival; one worker serves drones **round-robin**. Each of N drones gets 1/N
+   of the detector by construction.
+
+### 10.3 Bug: 85 % of every frame was one rclpy assignment (the old "~2 Hz")
+
+With pose fixed, each drone was still inferring only ~1 fps, so each got ~5 looks
+at its target per pass. Timing per frame: **total 350-450 ms, YOLO 11-15 ms**
+(GPU 6-10 ms). The rest was `np_to_img()` assigning `frame.tobytes()` to
+`Image.data`: rclpy's generated setter stores an `array('B')` as-is but
+validates any other sequence element by element in Python.
+
+| `Image.data =` | 1280x960 frame |
+|---|---|
+| `frame.tobytes()` | **296 ms** |
+| `array('B', frame.tobytes())` | 5 ms |
+
+After the one-line fix: **~27 ms per frame, every arriving frame inferred,
+~8-10 fps per drone with two drones** (was ~1). This is also the answer to
+section 5.1's open item - it was never transport. `test_perception.py` had the
+same line and is fixed too.
+
+### 10.4 Bug: every mission deadlocked after VERIFY
+
+`survey_node.finish()` called `rclpy.shutdown()` from inside the `tick` timer
+callback. In Humble that shuts down the global executor, which waits for
+in-flight callbacks to finish - including the one making the call (confirmed in
+`rclpy/__init__.py:111` and `Executor.shutdown`). The nodes never exited: the 26
+Sep launch logs show them alive ~7 min after VERIFY until Ctrl-C, and after a
+killed launch two orphaned `survey_node`s survived even SIGTERM. Now `finish()`
+sets a flag and `main()` shuts down outside the callback; both nodes print
+`process has finished cleanly` within a second of VERIFY.
+
+### 10.5 Tooling bugs that made a 2-drone run hard to run or read
+
+- **`hazard_map` drew the swarm wrong.** It picked the "newest" track by file
+  *name*, so after any swarm run it chose `survey_track_d1_*` - drone 1's track
+  in drone 1's own local frame, drawn on top of drone 0's band - and kept
+  choosing that stale file after later single-drone flights. Now: newest by
+  mtime; a swarm run switches on swarm mode automatically (every drone's track,
+  shifted by its band offset, a home marker per drone, band boundaries);
+  `--truth "15,15;15,45"` scores every band; a truth with nothing within
+  `--miss-radius` (5 m) is reported **MISSED** instead of as a 30 m geotag error.
+- **`check_system.sh` now sees the swarm.** It counts the running PX4
+  instances and probes telemetry and camera for each (closes the 9.6 OPEN item).
+- **`start_px4_swarm.sh --num-drones 2`** - the form `swarm_mission.launch.py`'s
+  docstring tells you to type - used to become the Gazebo MODEL and kill the
+  PX4 build. Flags now work (env vars too); unknown flags and `Y_MAX <= Y_MIN`
+  are rejected; an instance that never boots is no longer reported "sensors OK";
+  the blind-instance retry kills that PX4 explicitly.
+- **`tools/stop_sim.sh`** (new). `tmux kill-server` leaves `make px4_sitl`, PX4
+  and both `gz sim` processes running (seen three times on 27 Sep). The script
+  kills by process, escalates to SIGKILL, verifies nothing is left, and never
+  kills its own ancestors. Both launchers' stale-process cleanup now delegates to
+  it: their old `pkill -f px4_sitl` also killed any shell or `tail -f` whose
+  command line merely contained the string. Their inside-tmux guard now runs
+  before cleanup.
+- `TimerAction(period=<str>)` (deprecated) in `swarm_mission.launch.py` fixed;
+  the launcher's exec bit restored.
+
+### 10.6 Verification
+
+Same sim session, `--num-drones 2 --y-min 0 --y-max 60`, altitude 10 m, 1280 px,
+`conf` 0.65, one person per band at (15,15) and (15,45).
+
+| run | code state | drone 0 | drone 1 | both VERIFY | nodes exit |
+|---|---|---|---|---|---|
+| 1 | before fixes, stats added | 0.81, hit | best 0.48 | PASS | no (hang) |
+| 2 | before fixes | 0.82, hit | **0.65, DROPPED no-pose** | PASS | no (hang) |
+| 3 | MT executor, pre round-robin/bytes fix | best 0.46 | best 0.51 | PASS | **yes** |
+| **4** | **all fixes** | **0.82, 0.74 m** | **0.78, 0.82 m** | **PASS** | **yes** |
+| **5** | **all fixes** | **0.78, 0.93 m** | **0.79, 1.21 m** | **PASS** | **yes** |
+
+Runs 4 and 5: one row per target, no duplicates, no false positives, no drops,
+pose 50 Hz and ~8-10 inferred fps per drone throughout. Single-drone regression
+(`mission.launch.py`, target at 10,15): VERIFY PASS, clean exit, **one** row at
+0.92 m - the 8 Sep run on the old code logged three rows for the same target
+(0.78 / 2.44 / 3.08 m). Map: `~/maps/hazard_map_swarm_1790529684.png`.
+
+### 10.7 Still open
+
+- **A consistent along-track bias.** All five post-fix errors are negative North
+  (-0.74, -0.82, -0.92, -1.18, -0.92 m; cross-track <= 0.27 m). All come from the
+  southbound lane, so a timing term (`pose_lag_s` 0.25 too short by ~0.2 s now
+  that frames are stamped on arrival) and a geometric one (forward pitch at
+  3.8 m/s tilting the "nadir" camera backward, ~0.5 m at 10 m) cannot yet be
+  told apart. Put a target where it is seen on a northbound lane too, then
+  calibrate. Don't retune from one direction.
+- **Dedup keeps the first hit, not the best.** Frames at the image edge come
+  first; the single-drone run recorded 0.69 while 0.85 was seen seconds later.
+- **The band boundary is flown twice.** Drone 0's last lane and drone 1's first
+  lane are both at global E=30, same altitude, at different times. Lockstep keeps
+  them 30 m apart; a start desync of >~15 s would put two drones on one line.
+- Three drones still untested. Hardware (Track B) still at zero.

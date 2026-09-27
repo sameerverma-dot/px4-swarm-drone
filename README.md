@@ -5,9 +5,13 @@ Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 A swarm of drones (2–5) autonomously surveys an area, detects suspected
 landmines from a downward camera, and produces a geotagged hazard map.
 
-**Status:** the single-drone loop is verified end to end — survey, detect,
-geotag, return, verify — at **0.75 m** geotag accuracy with zero false
-positives. The **multi-drone swarm is the remaining software deliverable.**
+**Status:** the loop is verified end to end — survey, detect, geotag, return,
+verify — for **one drone** (0.75 m geotag, zero false positives, 5 Sep) and for
+**two drones flying concurrent bands** (12 Sep: both `VERIFY PASS`, drone 1's
+detection folded into drone 0's frame to within 1.70 m). Remaining on software:
+a third drone, a multi-target map renderer, and landmine weights in place of the
+COCO `person` stand-in. **Hardware (Track B) is 50 % of the grade and is at
+zero** — the project's largest risk. Details in `docs/PROGRESS.md` §9.
 
 The governing constraint: detection needs ~24 px on target, which caps flight
 altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px). Altitude sets
@@ -18,6 +22,8 @@ lane spacing, which sets flight time, which sets what the swarm buys — so read
 
 ## Run it
 
+**One drone:**
+
 ```bash
 # Terminal 1 — the simulator (plain terminal, NOT inside tmux)
 bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
@@ -26,11 +32,34 @@ bash ~/px4_ros_ws/start_px4_sim.sh gz_x500_mono_cam_down
 cd ~/px4_ros_ws && source install/setup.bash
 bash tools/check_system.sh                  # six layers, PASS/FAIL — want 0 failed
 bash tools/add_target.sh                    # the target is NOT in the world file
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
+ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0
 ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
 ```
 
-Stop everything: `tmux kill-server`
+**Two drones:**
+
+```bash
+# Terminal 1
+bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 2 --y-min 0 --y-max 60 gz_x500_mono_cam_down
+
+# Terminal 2 — one line at a time
+cd ~/px4_ros_ws && source install/setup.bash
+bash tools/check_system.sh                  # probes EVERY drone — want 0 failed
+NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh   # one target PER BAND
+ros2 launch survey swarm_mission.launch.py num_drones:=2 x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
+ros2 run perception hazard_map --area 0,30,0,60 --truth "15,15;15,45"
+```
+
+`num_drones`, `y_min` and `y_max` must be identical in all three of
+`start_px4_swarm.sh`, `add_swarm_targets.sh` and `swarm_mission.launch.py` —
+they compute the band geometry independently. Full runbooks with the failure
+modes: `docs/CHEATSHEET.md` §5.
+
+The survey nodes exit on their own after `VERIFY PASS`; the detector keeps
+running (Ctrl-C the launch when done).
+
+Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` — **not** `tmux
+kill-server`, which leaves PX4 and Gazebo running.
 
 ---
 
@@ -71,12 +100,19 @@ once, then `docs/CHEATSHEET.md` as a reference.
 
 ## Three things that will bite you
 
-1. **`tools/add_target.sh` after every sim start.** The target is not in the
-   world file — a model inserted through the Gazebo GUI dies with that sim
+1. **Spawn targets after every sim start** — `tools/add_target.sh` for one
+   drone, `tools/add_swarm_targets.sh` for a swarm. The target is not in the
+   world file; a model inserted through the Gazebo GUI dies with that sim
    process. One flight logged `VERIFY PASS`, flew perfect lanes over the target
-   position, and found nothing, because there was nothing there.
+   position, and found nothing, because there was nothing there. The 12 Sep
+   2-drone flight hit the swarm version of this: one target, in one band, so
+   half the swarm was never tested. Use the swarm spawner.
 2. **A listed topic is not a published topic.** `ros2 topic list` counts
-   subscribers too. Use `ros2 topic hz`, and note this build publishes on the
+   subscribers too. Check with
+   `ros2 topic echo <topic> --qos-reliability best_effort --once` — `echo`, not
+   `hz`, because in Humble only `echo` accepts that flag, and `/fmu/out/*`
+   publishes BEST_EFFORT, so a default RELIABLE subscription receives nothing
+   and a live topic looks dead. Note also that this build publishes on the
    **versioned** names (`/fmu/out/vehicle_local_position_v1`).
 3. **Rebuild after editing.** `tools/check_system.sh` reports a stale build; a
    stale build is the most common reason a fix appears not to work.

@@ -28,6 +28,7 @@ EXPECT: detector logs "HAZARD #n: person ..." lines, boxes in rqt_image_view,
 and rows appearing in ~/maps/hazard_points.csv.
 """
 
+import array
 import os
 import pathlib
 import sys
@@ -105,7 +106,7 @@ class TestPublisher(Node):
         m.encoding = 'bgr8'
         m.is_bigendian = 0
         m.step = self.frame.shape[1] * 3
-        m.data = self.frame.tobytes()
+        m.data = array.array('B', self.frame.tobytes())   # bytes: ~300 ms/frame in rclpy
         self.pub_img.publish(m)
 
 

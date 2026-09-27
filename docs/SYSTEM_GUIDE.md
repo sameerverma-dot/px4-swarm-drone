@@ -257,7 +257,7 @@ ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
 ros2 run rqt_image_view rqt_image_view /detection/image_annotated
 ```
 
-Stop everything: `tmux kill-server`
+Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` (not `tmux kill-server` — PX4 and Gazebo survive it)
 
 ### Test without flying
 ```bash

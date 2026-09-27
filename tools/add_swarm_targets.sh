@@ -160,9 +160,7 @@ echo
 echo "Then fly, and render the map:"
 echo "  ros2 launch survey swarm_mission.launch.py num_drones:=$NUM_DRONES \\"
 echo "      x_min:=$X_MIN x_max:=$X_MAX y_min:=$Y_MIN y_max:=$Y_MAX altitude:=10.0"
-echo "  ros2 run perception hazard_map --area $X_MIN,$X_MAX,$Y_MIN,$Y_MAX --truth ${TRUTHS[0]}"
-echo
-echo "NOTE: hazard_map --truth takes ONE point and --track plots ONE track file,"
-echo "so with $NUM_DRONES drones it scores drone 0's band only and draws one"
-echo "flight path. The other detections still appear as points. Making the map"
-echo "multi-target and multi-track is a known open item (docs/NEXT_SESSION.md)."
+TRUTH_ARG=$(IFS=';'; echo "${TRUTHS[*]}")
+echo "  ros2 run perception hazard_map --area $X_MIN,$X_MAX,$Y_MIN,$Y_MAX \\"
+echo "      --swarm $NUM_DRONES --y-min $Y_MIN --y-max $Y_MAX --truth \"$TRUTH_ARG\""
+echo "(draws every drone's track in drone 0's frame and scores every band)"

@@ -333,7 +333,7 @@ the camera `update_rate`, rather than at detector code.
 3. `commander` commands go in the **pxh>** pane, not a bash pane.
 4. Any process touching a gz topic needs `GZ_IP=127.0.0.1`.
 5. Move `hazard_points.csv` aside so runs stay comparable.
-6. Stop everything with `tmux kill-server`.
+6. Stop everything with `bash ~/px4_ros_ws/tools/stop_sim.sh` (`tmux kill-server` alone leaves PX4 and Gazebo running).
 
 ---
 
