@@ -30,6 +30,17 @@ Use yaw_mode:=fixed to get the old behaviour back.
 RESOLVED (was a known follow-up): lane_spacing is no longer a hardcoded guess -
 lane_spacing:=0.0 derives it from the camera footprint,
 2*altitude*tan(HFOV/2)*(1-sidelap).
+
+MULTI-DRONE (SWARM): namespace:='' (default) is byte-for-byte the old
+single-drone behaviour - unnamespaced /fmu/... topics, PX4 instance 0.
+For a second/third vehicle, PX4's own instance>0 convention namespaces its
+DDS topics as /px4_<instance>/fmu/... (see PX4's rcS); pass the matching
+namespace:='/px4_1' etc. here so this node talks to THAT vehicle.
+
+Area-splitting for a swarm needs no code change here: give each drone
+instance its own x_min/x_max/y_min/y_max (a band of the total survey area)
+and its own namespace/detect_topic/csv_prefix - see
+src/survey/launch/swarm_mission.launch.py, which computes the bands.
 """
 
 import csv
@@ -39,6 +50,7 @@ import time
 from enum import Enum
 
 import rclpy
+from rclpy.executors import ExternalShutdownException
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
@@ -83,6 +95,13 @@ class SurveyNode(Node):
         self.declare_parameter('rtl_on_complete', True)
         self.declare_parameter('verify', True)
         self.declare_parameter('csv_dir', '~/maps')
+        # PX4 DDS namespace prefix for a multi-vehicle sim, e.g. '/px4_1' for
+        # instance 1 ('' = instance 0, unnamespaced - the single-drone default).
+        self.declare_parameter('namespace', '')
+        # Filename prefix for the track CSV. Two drones finishing in the same
+        # wall-clock second (a real risk in a swarm) would otherwise collide,
+        # since write_csv() names the file by whole seconds.
+        self.declare_parameter('csv_prefix', 'survey_track')
         self.declare_parameter('arm_timeout_s', 30.0)
         self.declare_parameter('return_timeout_s', 180.0)
         # Carrot-chasing lookahead. A bare position setpoint at the far end of a
@@ -123,6 +142,10 @@ class SurveyNode(Node):
         self.rtl_on_complete = bool(g('rtl_on_complete').value)
         self.verify = bool(g('verify').value)
         self.csv_dir = os.path.expanduser(str(g('csv_dir').value))
+        self.namespace = str(g('namespace').value).strip()
+        if self.namespace and not self.namespace.startswith('/'):
+            self.namespace = '/' + self.namespace
+        self.csv_prefix = str(g('csv_prefix').value)
         self.arm_timeout_s = float(g('arm_timeout_s').value)
         self.return_timeout_s = float(g('return_timeout_s').value)
         self.lookahead = float(g('lookahead_m').value)
@@ -165,12 +188,13 @@ class SurveyNode(Node):
         )
 
         # ---- publishers ----
+        ns = self.namespace
         self.pub_ocm = self.create_publisher(
-            OffboardControlMode, '/fmu/in/offboard_control_mode', qos)
+            OffboardControlMode, f'{ns}/fmu/in/offboard_control_mode', qos)
         self.pub_sp = self.create_publisher(
-            TrajectorySetpoint, '/fmu/in/trajectory_setpoint', qos)
+            TrajectorySetpoint, f'{ns}/fmu/in/trajectory_setpoint', qos)
         self.pub_cmd = self.create_publisher(
-            VehicleCommand, '/fmu/in/vehicle_command', qos)
+            VehicleCommand, f'{ns}/fmu/in/vehicle_command', qos)
 
         # Detection gate for the perception node. TRANSIENT_LOCAL so a detector
         # that starts late still gets the current value instead of guessing.
@@ -185,9 +209,9 @@ class SurveyNode(Node):
         # on a topic with a _vN suffix (VehicleLocalPosition -> _v1,
         # VehicleStatus -> _v4). Older/other builds use the unversioned name.
         # Subscribe to BOTH so this works on either, whichever actually publishes.
-        for t in ('/fmu/out/vehicle_local_position', '/fmu/out/vehicle_local_position_v1'):
+        for t in (f'{ns}/fmu/out/vehicle_local_position', f'{ns}/fmu/out/vehicle_local_position_v1'):
             self.create_subscription(VehicleLocalPosition, t, self.on_pos, qos)
-        for t in ('/fmu/out/vehicle_status', '/fmu/out/vehicle_status_v4'):
+        for t in (f'{ns}/fmu/out/vehicle_status', f'{ns}/fmu/out/vehicle_status_v4'):
             self.create_subscription(VehicleStatus, t, self.on_status, qos)
 
         # ---- state ----
@@ -195,6 +219,7 @@ class SurveyNode(Node):
         self.pos_valid = False
         self.status = VehicleStatus()
         self.phase = Phase.INIT
+        self.done = False        # set by finish(); main() exits on it
         self.counter = 0
         self.last_engage_t = 0.0
         self.wp = self.build_waypoints()
@@ -206,13 +231,19 @@ class SurveyNode(Node):
         self.returned = False
         self.detecting = None            # last value published on detect_topic
         self.reached_alt = False         # latched once we first reach survey altitude
-        self.cmd_yaw = self.fixed_yaw    # last yaw actually commanded (rad, NED)
+        # Last yaw actually commanded in 'course' mode (rad, NED). Seeded NaN,
+        # not fixed_yaw: before the first real bearing is computed there is no
+        # course to face, and seeding it with fixed_yaw (default 0.0) meant
+        # 'course' mode opened by commanding North - a heading nobody asked for.
+        # NaN means "don't control yaw yet", so the drone keeps whatever heading
+        # it has until an actual course exists. 'fixed' mode does not use this.
+        self.cmd_yaw = float('nan')
 
         self.get_logger().info(
-            f"Survey x[{self.x_min},{self.x_max}] y[{self.y_min},{self.y_max}] "
-            f"alt={self.altitude}m lane={self.lane_spacing}m -> {len(self.wp)} waypoints; "
-            f"RTL={'on' if self.rtl_on_complete else 'off'}, verify={self.verify}, "
-            f"lookahead={self.lookahead}m, yaw={self.yaw_mode}")
+            f"Survey ns='{self.namespace or '(none)'}' x[{self.x_min},{self.x_max}] "
+            f"y[{self.y_min},{self.y_max}] alt={self.altitude}m lane={self.lane_spacing}m "
+            f"-> {len(self.wp)} waypoints; RTL={'on' if self.rtl_on_complete else 'off'}, "
+            f"verify={self.verify}, lookahead={self.lookahead}m, yaw={self.yaw_mode}")
         self.publish_detecting(False)
 
         self.timer = self.create_timer(0.1, self.tick)  # 10 Hz
@@ -274,7 +305,14 @@ class SurveyNode(Node):
         m.timestamp = self.us()
         self.pub_ocm.publish(m)
 
-    def send_sp(self, x, y, z, yaw=0.0):
+    def send_sp(self, x, y, z, yaw=float('nan')):
+        # The default is NaN, NOT 0.0, and that is the whole point. PX4 reads a
+        # NaN yaw setpoint as "don't control yaw"; it reads 0.0 as "face North".
+        # This function used to default to 0.0, so any caller that forgot the
+        # argument silently commanded North - which is exactly how the drone
+        # ended up crabbing sideways down every south-bound lane while the code
+        # looked correct. Defaulting to NaN makes a forgotten argument harmless
+        # instead of wrong.
         m = TrajectorySetpoint()
         m.position = [float(x), float(y), float(z)]
         m.velocity = [float('nan')] * 3
@@ -310,10 +348,12 @@ class SurveyNode(Node):
                 self.cmd_yaw = math.atan2(dy, dx)
         # Inside the deadzone (or before we have a position) keep the last
         # command, so the nose does not spin while the drone climbs or settles
-        # onto a waypoint.
+        # onto a waypoint. Until a bearing has ever been computed cmd_yaw is
+        # still NaN, which PX4 reads as "leave yaw alone" - the correct answer
+        # when there is no course yet, and not the same as facing North.
         return self.cmd_yaw
 
-    def send_sp_limited(self, x, y, z, yaw=0.0):
+    def send_sp_limited(self, x, y, z, yaw=float('nan')):
         """Position setpoint with a speed cap.
 
         Instead of handing PX4 the far end of the lane (which it flies at
@@ -349,8 +389,16 @@ class SurveyNode(Node):
         m.param5 = float(p.get('param5', 0.0))
         m.param6 = float(p.get('param6', 0.0))
         m.param7 = float(p.get('param7', 0.0))
-        m.target_system = 1
-        m.target_component = 1
+        # target_system=0 means "broadcast, any system" - PX4's commander
+        # (Commander::handle_command) silently DROPS a command whose
+        # target_system doesn't match its own vehicle_status.system_id, with
+        # no error either side. Instance N sets MAV_SYS_ID=N+1 (PX4 rcS), so a
+        # hardcoded target_system=1 would silently stop working on any
+        # namespaced instance - exactly this project's GZ_IP/unversioned-topic
+        # class of bug. 0 works for every instance because each instance's
+        # command topic is already isolated by the DDS namespace, not by id.
+        m.target_system = 0
+        m.target_component = 0
         m.source_system = 1
         m.source_component = 1
         m.from_external = True
@@ -473,7 +521,7 @@ class SurveyNode(Node):
     def write_csv(self):
         try:
             os.makedirs(self.csv_dir, exist_ok=True)
-            path = os.path.join(self.csv_dir, f"survey_track_{int(time.time())}.csv")
+            path = os.path.join(self.csv_dir, f"{self.csv_prefix}_{int(time.time())}.csv")
             with open(path, 'w', newline='') as f:
                 w = csv.writer(f)
                 w.writerow(['t_s', 'x_ned', 'y_ned', 'z_ned'])
@@ -506,16 +554,22 @@ class SurveyNode(Node):
             self.timer.cancel()
         except Exception:  # noqa: BLE001
             pass
-        if rclpy.ok():
-            rclpy.shutdown()
+        # Do NOT call rclpy.shutdown() here. finish() runs inside the tick()
+        # timer callback, and in Humble rclpy.shutdown() shuts down the global
+        # executor, which blocks until in-flight callbacks finish - i.e. until
+        # this one returns. It deadlocked every run after VERIFY: the node never
+        # exited, `ros2 launch` never ended, and SIGTERM could not stop it
+        # either. main() sees this flag and shuts down outside the callback.
+        self.done = True
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = SurveyNode()
     try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, SystemExit):
+        while rclpy.ok() and not node.done:
+            rclpy.spin_once(node, timeout_sec=0.1)
+    except (KeyboardInterrupt, SystemExit, ExternalShutdownException):
         pass
     finally:
         try:

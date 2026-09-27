@@ -4,8 +4,14 @@
 # Probes the stack layer by layer and prints PASS / FAIL / SKIP for each, so a
 # failure tells you WHICH layer broke instead of "the mission didn't work".
 #
-#   bash ~/px4_ros_ws/check_system.sh          # full check (sim should be running)
-#   bash ~/px4_ros_ws/check_system.sh --quick  # skip the live-topic probes
+#   bash ~/px4_ros_ws/tools/check_system.sh          # full check (sim should be running)
+#   bash ~/px4_ros_ws/tools/check_system.sh --quick  # skip the live-topic probes
+#   NUM_DRONES=2 bash ~/px4_ros_ws/tools/check_system.sh   # force the drone count
+#
+# Swarm-aware: counts the running PX4 instances (instance 0 = no `-i`,
+# standalone ones = `-i N`) and probes telemetry and camera for EVERY one of
+# them. It used to probe /fmu/out/* only, i.e. instance 0, and reported
+# "0 failed" while drone 1 was booted blind (PROGRESS.md 9.6).
 #
 # Read-only: starts nothing, kills nothing, changes nothing.
 #
@@ -61,8 +67,18 @@ if [[ ! -f "$WS/install/setup.bash" ]]; then
     sk "build up to date" "nothing built yet"
 else
 for pkg in survey perception; do
-    src=$(find "$WS/src/$pkg" -name '*.py' -newer "$WS/install/$pkg" 2>/dev/null | head -1)
-    [[ -n "$src" ]] && stale="$stale $pkg"
+    # Compare the newest SOURCE .py against the newest INSTALLED .py.
+    # (The previous version compared against the install/<pkg> DIRECTORY, whose
+    # mtime only changes when its direct children do - so it reported "stale"
+    # immediately after a successful build. False alarms train you to ignore
+    # the check, which defeats the point of having it.)
+    src_t=$(find "$WS/src/$pkg" -name '*.py' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+    inst_t=$(find "$WS/install/$pkg" -name '*.py' -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+    if [[ -z "$inst_t" ]]; then
+        stale="$stale $pkg(not-installed)"
+    elif awk "BEGIN{exit !(${src_t:-0} > $inst_t + 2)}"; then
+        stale="$stale $pkg"
+    fi
 done
 if [[ -n "$stale" ]]; then
     no "build up to date" "source newer than build:$stale" \
@@ -97,6 +113,28 @@ proc_check "Gazebo server"        "gz sim"          "$LAUNCH"
 SIM_UP=0
 pgrep -f "bin/px4" >/dev/null 2>&1 && pgrep -f "MicroXRCEAgent" >/dev/null 2>&1 && SIM_UP=1
 
+# How many PX4 instances? Instance 0 runs without -i; standalone ones with -i N.
+detect_drones() {
+    local maxi=-1 n
+    while read -r n; do [[ "$n" -gt "$maxi" ]] && maxi="$n"; done < <(
+        pgrep -ax px4 2>/dev/null | grep -o -- ' -i [0-9]\+' | awk '{print $2}')
+    if [[ "$maxi" -ge 0 ]]; then echo $((maxi + 1))
+    elif pgrep -x px4 >/dev/null 2>&1; then echo 1
+    else echo 0; fi
+}
+DETECTED=$(detect_drones)
+NUM_DRONES="${NUM_DRONES:-$DETECTED}"
+[[ "$NUM_DRONES" -lt 1 ]] && NUM_DRONES=1
+if [[ $SIM_UP -eq 1 ]]; then
+    if [[ "$DETECTED" -lt "$NUM_DRONES" ]]; then
+        no "PX4 instances" "$DETECTED running, $NUM_DRONES expected" \
+           "an instance died - check log/swarm_launch_*/px4_sitl_<i>.log"
+    else
+        ok "PX4 instances" "$NUM_DRONES"
+    fi
+fi
+ns_of() { [[ "$1" -eq 0 ]] && echo "" || echo "/px4_$1"; }
+
 # ---------------------------------------------------------------- 2 telemetry
 hdr "2 · telemetry  (PX4 -> ROS 2, over DDS)"
 
@@ -115,24 +153,32 @@ if [[ $QUICK -eq 1 ]]; then
 elif [[ $SIM_UP -eq 0 ]]; then
     sk "telemetry probes" "sim not running"
 else
+  for ((i=0; i<NUM_DRONES; i++)); do
+    ns=$(ns_of "$i")
+    tag=""; [[ $NUM_DRONES -gt 1 ]] && tag="drone $i "
     FOUND=""
-    for t in /fmu/out/vehicle_local_position_v1 /fmu/out/vehicle_local_position; do
+    for t in "$ns/fmu/out/vehicle_local_position_v1" "$ns/fmu/out/vehicle_local_position"; do
         if live_topic "$t"; then FOUND="$t"; break; fi
     done
     if [[ -n "$FOUND" ]]; then
-        ok "vehicle_local_position" "live on $FOUND"
+        ok "${tag}vehicle_local_position" "live on $FOUND"
         [[ "$FOUND" == *_v1 ]] || printf "        ${Y}note${N} unversioned topic is the live one on this build\n"
     else
-        no "vehicle_local_position" "NO DATA on either name" \
-           "agent running but PX4 not connected - restart the stack"
+        # For i>0 this is the blind-instance signature: the DDS writer exists
+        # (so the topic is LISTED) but EKF2 never got sensor data.
+        no "${tag}vehicle_local_position" "NO DATA on either name" \
+           "$([[ $i -eq 0 ]] && echo "agent running but PX4 not connected - restart the stack" \
+              || echo "instance $i booted blind? grep 'Preflight Fail' log/swarm_launch_*/px4_sitl_$i.log")"
     fi
 
     FOUND=""
-    for t in /fmu/out/vehicle_status_v4 /fmu/out/vehicle_status; do
+    for t in "$ns/fmu/out/vehicle_status_v4" "$ns/fmu/out/vehicle_status"; do
         if live_topic "$t"; then FOUND="$t"; break; fi
     done
-    [[ -n "$FOUND" ]] && ok "vehicle_status" "live on $FOUND" \
-                      || no "vehicle_status" "NO DATA on either name"
+    [[ -n "$FOUND" ]] && ok "${tag}vehicle_status" "live on $FOUND" \
+                      || no "${tag}vehicle_status" "NO DATA on either name" \
+                            "PX4 commander silent - restart: bash $WS/tools/stop_sim.sh"
+  done
 fi
 
 # ---------------------------------------------------------------- 3 camera
@@ -151,33 +197,53 @@ else
         no "camera advertised" "not in gz topic -l" \
            "wrong model? launch with gz_x500_mono_cam_down"
     fi
+  for ((i=0; i<NUM_DRONES; i++)); do
+    cam="${CAM_GZ/x500_mono_cam_down_0/x500_mono_cam_down_$i}"
+    tag=""; [[ $NUM_DRONES -gt 1 ]] && tag="drone $i "
     # Advertised != delivering. THIS is the check that catches a GZ_IP mismatch.
-    BYTES=$(timeout 6 gz topic -e -t "$CAM_GZ" 2>/dev/null | head -c 200 | wc -c)
+    BYTES=$(timeout 6 gz topic -e -t "$cam" 2>/dev/null | head -c 200 | wc -c)
     if [[ "${BYTES:-0}" -gt 0 ]]; then
-        ok "camera DELIVERING frames" "with GZ_IP=127.0.0.1"
+        ok "${tag}camera DELIVERING frames" "with GZ_IP=127.0.0.1"
     else
-        no "camera DELIVERING frames" "advertised but silent" \
-           "GZ_IP mismatch - see CAMERA_DIAGNOSTIC.md"
+        no "${tag}camera DELIVERING frames" "advertised but silent" \
+           "GZ_IP mismatch - see docs/CAMERA_DIAGNOSTIC.md"
     fi
 
-    if timeout 6 ros2 topic echo "$CAM_GZ" --once >/dev/null 2>&1; then
-        ok "camera bridged into ROS 2" ""
+    if timeout 6 ros2 topic echo "$cam" --once >/dev/null 2>&1; then
+        ok "${tag}camera bridged into ROS 2" ""
     else
-        sk "camera bridged into ROS 2" "bridge not running (starts with the mission)"
+        sk "${tag}camera bridged into ROS 2" "bridge not running (starts with the mission)"
     fi
+  done
 fi
 
 # ---------------------------------------------------------------- 4 inference
 hdr "4 · inference"
 
 py_has() { python3 -c "import $1" >/dev/null 2>&1; }
-for m in cv2 numpy; do
-    py_has "$m" && ok "python: $m" "" || no "python: $m" "missing" "pip install --user opencv-python"
-done
-py_has ultralytics && ok "python: ultralytics" "" \
-                   || no "python: ultralytics" "missing" "pip install --user ultralytics"
-py_has matplotlib && ok "python: matplotlib" "(hazard_map)" \
-                  || no "python: matplotlib" "missing" "pip install --user matplotlib"
+
+# "missing" and "installed but won't import" are DIFFERENT faults with different
+# fixes, and calling both "missing" sends you in a circle: pip replies "already
+# satisfied" while the check keeps failing. Same trap as a topic being listed
+# but not published - report what is actually wrong.
+py_check() {   # module  pip-name  [note]
+    local err
+    if err=$(python3 -c "import $1" 2>&1); then
+        ok "python: $1" "${3:-}"
+    elif [[ "$err" == *"No module named"* ]]; then
+        no "python: $1" "not installed" "pip install --user $2"
+    else
+        local why
+        why=$(printf '%s' "$err" | grep -v '^\s*File \|^\s*$\|^Traceback' | tail -1 | cut -c1-58)
+        no "python: $1" "INSTALLED BUT BROKEN - $why" \
+           "pip install --user --upgrade $2     # usually a numpy ABI mismatch"
+    fi
+}
+
+py_check cv2         opencv-python
+py_check numpy       numpy
+py_check ultralytics ultralytics
+py_check matplotlib  matplotlib  "(hazard_map)"
 
 if py_has torch; then
     read -r TV CU GPU < <(python3 - <<'PY'
@@ -231,7 +297,12 @@ printf "  ${G}%d passed${N}   ${R}%d failed${N}   ${Y}%d skipped${N}\n" "$pass" 
 if [[ $fail -eq 0 ]]; then
     printf "\n  Everything probed is working. Fly it:\n"
     printf "    ${D}cd %s && source install/setup.bash${N}\n" "$WS"
-    printf "    ${D}ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0${N}\n"
+    if [[ $NUM_DRONES -gt 1 ]]; then
+        printf "    ${D}ros2 launch survey swarm_mission.launch.py num_drones:=%d y_min:=0.0 y_max:=60.0 altitude:=10.0${N}\n" "$NUM_DRONES"
+        printf "    ${D}(y_min/y_max must match what start_px4_swarm.sh was given)${N}\n"
+    else
+        printf "    ${D}ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0${N}\n"
+    fi
 else
     printf "\n  Fix the FIRST failure above - later layers depend on earlier ones.\n"
     if [[ -n "$FIRST_FAIL" ]]; then

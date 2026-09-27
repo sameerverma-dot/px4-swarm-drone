@@ -31,7 +31,7 @@ The first three are tmux panes; QGC opens in its own window.
 ### ALWAYS do this before flying
 
 ```bash
-bash ~/px4_ros_ws/check_system.sh
+bash ~/px4_ros_ws/tools/check_system.sh
 ```
 
 Probes six layers — environment, processes, telemetry, camera, inference,
@@ -147,7 +147,7 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 | Vendored (not yours) | `~/px4_ros_ws/src/px4_msgs`, `~/px4_ros_ws/src/px4_ros_com` |
 | Launch files | `src/survey/launch/{survey,mission}.launch.py`, `src/perception/launch/perception.launch.py` |
 | Map renderer | `src/perception/perception/hazard_map.py` (`ros2 run perception hazard_map`) |
-| System self-test | `check_system.sh` |
+| System self-test | `tools/check_system.sh` |
 | **Outputs** | `~/maps/survey_track_<ts>.csv` (flown path), `~/maps/hazard_points.csv` (detections), `~/maps/hazard_map_*.png` / `.geojson` |
 | PX4 firmware / SITL | `~/PX4-Autopilot` |
 | DDS agent | `~/Micro-XRCE-DDS-Agent` |
@@ -155,8 +155,8 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 | Per-run logs | `~/px4_ros_ws/log/sim_launch_<timestamp>/` |
 | Gazebo server log | `~/.gz/sim/log/<timestamp>/server_console.log` ← open this first for any Gazebo problem |
 
-> **Careful:** `~/px4_ros_ws/survey_node.py` (workspace root) is an old standalone
-> copy kept for running without `colcon`. It is **not** the file the package uses
+> **Careful:** `~/px4_ros_ws/archive/survey_node.py` is an old standalone copy,
+> kept only so the history is not lost. It is **not** the file the package uses
 > and it does **not** have the current fixes. Edit
 > `src/survey/survey/survey_node.py` instead.
 
@@ -169,7 +169,7 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 - Mouse is enabled — click a pane to focus it, scroll with the wheel
   (press `q` to leave scroll mode before typing again)
 - `Ctrl-b` then `d` — detach (stack keeps running); `tmux attach -t px4_sim` to return
-- `tmux kill-server` — stop everything
+- `bash ~/px4_ros_ws/tools/stop_sim.sh` — stop everything (`tmux kill-server` alone leaves PX4 and Gazebo running)
 
 Left pane = DDS agent · right pane = PX4 console (`pxh>`) · bottom = ROS 2 shell.
 
