@@ -21,10 +21,11 @@ def generate_launch_description():
         'y_min': '0.0',
         'y_max': '30.0',
         'altitude': '10.0',
-        # 0.0 = derive from the camera footprint at the chosen altitude
-        # (2*h*tan(HFOV/2) * (1 - sidelap)). A positive value overrides it.
+        # 0.0 = derive from the detection swath at the chosen altitude
+        # (2*h*tan(detect_fov_deg/2) * (1 - sidelap)). A positive value overrides it.
         'lane_spacing': '0.0',
-        'sidelap': '0.3',
+        'sidelap': '0.2',
+        'detect_fov_deg': '28.0',
         'hfov_rad': '1.74',
         # --- tolerances & timeouts ---
         'reach_tol': '1.5',

@@ -27,9 +27,11 @@ used to go out with the default yaw=0.0, which is an ACTIVE command to face
 North, so the drone crabbed sideways down every south-bound lane.
 Use yaw_mode:=fixed to get the old behaviour back.
 
-RESOLVED (was a known follow-up): lane_spacing is no longer a hardcoded guess -
-lane_spacing:=0.0 derives it from the camera footprint,
-2*altitude*tan(HFOV/2)*(1-sidelap).
+lane_spacing:=0.0 (default) derives it from what the DETECTOR can see, not from
+the camera footprint: 2*altitude*tan(detect_fov_deg/2)*(1-sidelap). The 2 Oct
+calibration (tools/analyse_sightings.py) found a person is reliably scored
+>= 0.65 only within ~2.5 m of the track at 10 m altitude, against a 23.7 m wide
+footprint: footprint-spaced lanes (16.6 m) left targets 7.5 m off-lane unrecorded.
 
 MULTI-DRONE: namespace:='' (default) is PX4 instance 0, unnamespaced /fmu/...
 For instance i>0 PX4 namespaces its DDS topics /px4_<i>/fmu/... (PX4's rcS);
@@ -50,12 +52,15 @@ Peers talk to each other directly over /swarm/heartbeat (swarm_msgs):
                   and its projected finish time has passed (a silent drone may
                   still be flying - see swarm_logic.SwarmCoordinator). The
                   nearest available drone claims; ties -> lower id.
-  * separation    if a peer comes inside sep_horizontal_m / sep_vertical_m the
-                  higher-id drone (or whoever is still in offboard, if the
-                  other is under PX4 RTL) holds position and moves vertically
-                  away until the peer is clear. On top of altitude separation:
-                  takeover transits fly a drone-specific layer above survey
-                  altitude, and PX4 RTL altitudes are staggered by the launcher.
+  * separation    if a peer comes inside sep_horizontal_m / sep_vertical_m, one
+                  drone gives way: a working drone beats an idle (HOLD) one,
+                  which beats one already yielding, ties to the lower id; a
+                  peer under PX4 control (RTL) is always given way to. The
+                  yielding drone stops, moves vertically clear (never through
+                  the other drone), then carries on along its route at that
+                  altitude until the peer is clear. On top of altitude
+                  separation: takeover transits fly a drone-specific layer
+                  above survey altitude; PX4 RTL altitudes are staggered.
 
 All decision logic lives in swarm_logic.py and is unit-tested there. With
 drone_id < 0 (default) none of this runs and the node behaves exactly as the
@@ -119,8 +124,25 @@ class SurveyNode(Node):
         # which is what you actually want for a coverage survey. A positive
         # value overrides the derivation.
         self.declare_parameter('lane_spacing', 0.0)    # metres between lanes; 0 = derive
-        self.declare_parameter('sidelap', 0.3)         # fraction of overlap between lanes
+        self.declare_parameter('sidelap', 0.2)         # fraction of overlap between lanes
         self.declare_parameter('hfov_rad', 1.74)       # mono_cam SDF; must match the detector
+        # Full cross-track angle within which the detector reliably scores a
+        # target >= its threshold. Measured 2 Oct over three flights, 74 steady
+        # passes of a COCO 'person' at 10 m (tools/analyse_sightings.py):
+        #   lateral 0-1.5 m 10/11 recorded, 1.5-3 m 7/11, 3-4.5 m 3/12,
+        #   beyond 4.5 m 10/40 (only lucky oblique views).
+        # 28 deg = +-2.5 m at 10 m; with 20% sidelap -> 4 m lanes, so every point
+        # is within 2 m of one lane and ~2 m of the next: >= ~90% per target.
+        # Re-measure for any other weights - a landmine model has its own swath.
+        self.declare_parameter('detect_fov_deg', 28.0)
+        # Each lane starts and ends this far OUTSIDE [x_min, x_max], and the
+        # detection gate is open only while the drone is over [x_min, x_max].
+        # Turning onto a lane the drone banks 20+ deg and yaws ~140 deg/s, and
+        # geotags stay poor for a while after: over two flights (2 Oct) the
+        # error to truth was p90 1.47 m in the first 6 m of a lane against
+        # <= 0.5 m from 6 m on, and ~1 m again while braking at the end. The
+        # camera sees ~9 m ahead and behind, so the area's edges are still seen.
+        self.declare_parameter('lead_in_m', 6.0)
         self.declare_parameter('reach_tol', 1.5)       # waypoint reach tolerance (m)
         self.declare_parameter('return_tol', 3.0)      # home-return tolerance (m)
         self.declare_parameter('rtl_on_complete', True)
@@ -180,6 +202,9 @@ class SurveyNode(Node):
         self.declare_parameter('sep_vertical_m', 5.0)
         self.declare_parameter('sep_climb_m', 5.0)
         self.declare_parameter('sep_clear_s', 2.0)
+        # A yield moves away horizontally; after this long, against a peer that
+        # is holding its altitude, it passes over/under instead (separation()).
+        self.declare_parameter('yield_pass_s', 20.0)
         # --- fault injection, for testing the swarm behaviours ---
         self.declare_parameter('start_delay_s', 0.0)
         self.declare_parameter('abort_after_lanes', -1)
@@ -187,6 +212,8 @@ class SurveyNode(Node):
         g = self.get_parameter
         self.x_min = float(g('x_min').value)
         self.x_max = float(g('x_max').value)
+        lead = max(0.0, float(g('lead_in_m').value))
+        self.lane_x0, self.lane_x1 = self.x_min - lead, self.x_max + lead
         self.y_min = float(g('y_min').value)
         self.y_max = float(g('y_max').value)
         self.altitude = float(g('altitude').value)
@@ -230,6 +257,7 @@ class SurveyNode(Node):
         self.sep_v = float(g('sep_vertical_m').value)
         self.sep_climb = float(g('sep_climb_m').value)
         self.sep_clear_s = float(g('sep_clear_s').value)
+        self.yield_pass_s = float(g('yield_pass_s').value)
         self.start_delay = max(0.0, float(g('start_delay_s').value))
         self.abort_after = int(g('abort_after_lanes').value)
 
@@ -240,18 +268,25 @@ class SurveyNode(Node):
         # stepping by that much times (1 - sidelap) guarantees the requested
         # overlap between adjacent lanes. Too wide leaves unphotographed gaps
         # between lanes - the survey "passes" while missing ground.
+        #
+        # The camera seeing the ground is not the detector finding the target:
+        # far off-track the object is small and seen obliquely and confidence
+        # drops below threshold. So the strip that counts is the DETECTION
+        # swath (detect_fov_deg), capped at the footprint.
         self.footprint_w = 2.0 * self.altitude * math.tan(self.hfov / 2.0)
+        self.swath_w = min(self.footprint_w, 2.0 * self.altitude * math.tan(
+            math.radians(min(max(float(g('detect_fov_deg').value), 1.0), 170.0)) / 2.0))
         if self.lane_spacing <= 0.0:
-            self.lane_spacing = max(self.footprint_w * (1.0 - self.sidelap), 0.5)
+            self.lane_spacing = max(self.swath_w * (1.0 - self.sidelap), 0.5)
             self.get_logger().info(
-                f"lane_spacing derived: footprint {self.footprint_w:.2f} m at "
-                f"{self.altitude:.1f} m altitude, {self.sidelap:.0%} sidelap "
-                f"-> {self.lane_spacing:.2f} m")
-        elif self.lane_spacing > self.footprint_w:
+                f"lane_spacing derived: detection swath {self.swath_w:.2f} m "
+                f"(camera footprint {self.footprint_w:.2f} m) at {self.altitude:.1f} m "
+                f"altitude, {self.sidelap:.0%} sidelap -> {self.lane_spacing:.2f} m")
+        elif self.lane_spacing > self.swath_w:
             self.get_logger().warn(
-                f"lane_spacing {self.lane_spacing:.1f} m EXCEEDS the camera "
-                f"footprint {self.footprint_w:.1f} m at {self.altitude:.1f} m "
-                f"altitude -> unphotographed gaps between lanes. "
+                f"lane_spacing {self.lane_spacing:.1f} m EXCEEDS the detection "
+                f"swath {self.swath_w:.1f} m at {self.altitude:.1f} m altitude -> "
+                f"targets between lanes can go unrecorded. "
                 f"Use lane_spacing:=0.0 to derive it.")
 
         if self.swarm:
@@ -355,7 +390,8 @@ class SurveyNode(Node):
         self.hold_t0 = None
         self.hold_xy = None
         self.hold_reason = ''
-        self.yielding = None             # {'peer','x','y','z','clear_since'}
+        self.yielding = None             # see separation()
+        self.last_yield = {}             # peer id -> when my last yield to it ended
         self.gate_alt_ok = False
         self.battery = -1.0
         self.end_reason = ''
@@ -399,20 +435,15 @@ class SurveyNode(Node):
         [y_min, y_max]. Swarm: the same pattern over this drone's own band."""
         wps = [dict(x=0.0, y=0.0, z=self.z, kind='climb', band=-1, lane=-1)]
         if self.swarm:
-            for x, y, k, end in sl.lane_waypoints(self.lanes_y, self.x_min, self.x_max):
+            for x, y, k, end in sl.lane_waypoints(self.lanes_y, self.lane_x0, self.lane_x1):
                 wps.append(dict(x=x, y=y, z=self.z, kind='lane_end' if end else 'lane_start',
                                 band=self.me, lane=k))
             return wps
-        step = abs(self.lane_spacing) if self.lane_spacing else (self.y_max - self.y_min)
-        step = step if step > 1e-6 else 1.0
-        ys = []
-        y = self.y_min
-        while y < self.y_max - 1e-6:
-            ys.append(y)
-            y += step
-        ys.append(self.y_max)  # always cover the far edge
+        # Same strip-centred rule as the swarm (swarm_logic.lane_offsets): lanes
+        # down the middle of equal strips, none wasted on the area's edges.
+        ys = [self.y_min + o for o in sl.lane_offsets(self.y_max - self.y_min, self.lane_spacing)]
         for i, yy in enumerate(ys):
-            a, b = (self.x_min, self.x_max) if i % 2 == 0 else (self.x_max, self.x_min)
+            a, b = (self.lane_x0, self.lane_x1) if i % 2 == 0 else (self.lane_x1, self.lane_x0)
             wps.append(dict(x=a, y=yy, z=self.z, kind='lane_start', band=-1, lane=i))
             wps.append(dict(x=b, y=yy, z=self.z, kind='lane_end', band=-1, lane=i))
         return wps
@@ -424,7 +455,7 @@ class SurveyNode(Node):
         px, py = (self.pos.x, self.pos.y) if self.pos_valid else (0.0, 0.0)
         best = None
         for rev in (False, True):
-            lanes = sl.lane_waypoints(self.lanes_y, self.x_min, self.x_max, from_lane, rev)
+            lanes = sl.lane_waypoints(self.lanes_y, self.lane_x0, self.lane_x1, from_lane, rev)
             d = math.hypot(lanes[0][0] - px, lanes[0][1] + dy - py)
             if best is None or d < best[0]:
                 best = (d, lanes)
@@ -532,6 +563,21 @@ class SurveyNode(Node):
         # still NaN, which PX4 reads as "leave yaw alone" - the correct answer
         # when there is no course yet, and not the same as facing North.
         return self.cmd_yaw
+
+    def course_yaw(self, idx):
+        """desired_yaw() for waypoint idx, except that heading for a lane START
+        the drone already faces along that lane: it sidesteps onto the lane
+        instead of swinging up to 180 deg at its start, so it is straight when
+        the area - and the detection gate - begins. (2 Oct: the swing from home
+        onto lane 0 was still going at the area edge, and a 0.85 detection of
+        a target 4 m inside was dropped as 'turning'.)"""
+        w = self.wp[idx]
+        if (self.yaw_mode == 'course' and w['kind'] == 'lane_start'
+                and idx + 1 < len(self.wp) and self.wp[idx + 1]['kind'] == 'lane_end'):
+            nxt = self.wp[idx + 1]
+            self.cmd_yaw = math.atan2(nxt['y'] - w['y'], nxt['x'] - w['x'])
+            return self.cmd_yaw
+        return self.desired_yaw(w['x'], w['y'])
 
     def send_sp_limited(self, x, y, z, yaw=float('nan')):
         """Position setpoint with a speed cap.
@@ -670,8 +716,33 @@ class SurveyNode(Node):
             self.peer_live[j] = live
 
     # ---------- swarm: separation ----------
+    def work_state(self):
+        """What I am doing, ignoring any yield - my priority in a conflict."""
+        if self.phase == Phase.HOLD:
+            return sl.HOLD
+        return sl.TAKEOVER if self.claim else sl.SURVEY
+
     def separation(self, now):
-        """-> True if this tick's setpoint has been taken over by a yield."""
+        """-> True if this tick's setpoint has been taken over by a yield.
+
+        CLEAR (the default yield): keep my altitude and move straight away from
+        the peer until 1.25 x sep_h apart. It never changes altitude, so it
+        cannot cross a peer that is itself climbing or descending. The previous
+        version yielded vertically first; on 2 Oct it went up just as the peer
+        began its RTL climb, and they passed 3.3 m apart at the same height.
+
+        HOLD -> PASS: only against a peer that is holding its altitude
+        (|vz| < 0.3 m/s) and still in my way after yield_pass_s, or that I
+        yielded to in the last 30 s (it is parked on my route). Go vertically
+        to the yield altitude at my position, then carry on along my route over
+        or under it rather than waiting for it to leave. If it starts climbing
+        or descending, back to CLEAR. (A peer in HOLD never blocks a working
+        drone - right of way - so this is for a stationary peer under PX4
+        control.)
+
+        The yield ends when the peer is 1.25 x sep_h away horizontally (in
+        CLEAR also: sep_v + 1 m away vertically) for sep_clear_s, or is silent.
+        """
         if not (self.sep_on and self.pos_valid and self.is_armed
                 and self.phase in (Phase.SURVEY, Phase.HOLD)):
             self.yielding = None
@@ -679,40 +750,100 @@ class SurveyNode(Node):
         me = (self.pos.x, self.pos.y + self.my_east0, -self.pos.z)
         peers = [(j, p.state, p.north, p.east, p.alt, now - p.rx_time)
                  for j, p in self.coord.peers.items()]
-        hit = sl.separation_conflict(self.me, me, peers, self.sep_h, self.sep_v,
-                                     max_age_s=1.5)
+        hit = sl.separation_conflict(self.me, self.work_state(), me, peers,
+                                     self.sep_h, self.sep_v, max_age_s=1.5)
+        y = self.yielding
         if hit and hit[3]:
-            if self.yielding is None:
-                alt = sl.yield_altitude(me[2], hit[4], self.sep_v, self.sep_climb)
-                self.yielding = dict(peer=hit[0], x=self.pos.x, y=self.pos.y, z=-alt,
-                                     clear_since=None)
+            if y is None:
+                p = self.coord.peers.get(hit[0])
+                self.yielding = y = dict(peer=hit[0], x=self.pos.x, y=self.pos.y, z=self.pos.z,
+                                         stage='clear', clear_since=None, t0=now,
+                                         warned=False, no_pass=False)
                 self.publish_detecting(False)
                 self.get_logger().warn(
                     f"SEPARATION: peer {hit[0]} at {hit[1]:.1f} m horizontal / "
-                    f"{hit[2]:.1f} m vertical -> yielding: hold position, go to "
-                    f"{alt:.1f} m")
-            else:
-                self.yielding['clear_since'] = None
-        elif self.yielding:
-            p = self.coord.peers.get(self.yielding['peer'])
-            gone = p is None or now - p.rx_time > self.peer_timeout
-            far = (not gone) and math.hypot(p.north - me[0], p.east - me[1]) >= 1.25 * self.sep_h
-            if gone or far:
-                if self.yielding['clear_since'] is None:
-                    self.yielding['clear_since'] = now
-                elif now - self.yielding['clear_since'] >= self.sep_clear_s:
+                    f"{hit[2]:.1f} m vertical -> yielding: moving away at my altitude")
+                if p is not None and abs(p.vz) < 0.3 and \
+                        now - self.last_yield.get(hit[0], -1e9) < 30.0:
+                    self._yield_vertical(y, me, p, 'is parked on my route')
+            elif hit[0] != y['peer'] and y['stage'] == 'clear':
+                y['peer'] = hit[0]         # a nearer conflict: get away from that one
+            y['clear_since'] = None
+        if y is None:
+            return False
+
+        p = self.coord.peers.get(y['peer'])
+        gone = p is None or now - p.rx_time > self.peer_timeout
+        dh = math.hypot(p.north - me[0], p.east - me[1]) if not gone else float('inf')
+        dv = abs(p.alt - me[2]) if not gone else float('inf')
+        clear_h = 1.25 * self.sep_h
+
+        if gone:
+            pass
+        elif y['stage'] == 'clear':
+            if (not y['no_pass'] and abs(p.vz) < 0.3 and dh < clear_h
+                    and now - y['t0'] > self.yield_pass_s):
+                self._yield_vertical(y, me, p, f"still in my way after {now - y['t0']:.0f} s")
+        elif abs(p.vz) >= 0.5 or (y['stage'] == 'pass' and dv < self.sep_v - 1.0):
+            # it started moving vertically: never race it up or down
+            y.update(stage='clear', x=self.pos.x, y=self.pos.y, z=self.pos.z, no_pass=True)
+            self.get_logger().warn(
+                f"SEPARATION: peer {y['peer']} {'climbing' if p.vz > 0 else 'descending'} "
+                f"({p.vz:+.1f} m/s, {dv:.1f} m vertically) -> moving away at my altitude")
+        elif y['stage'] == 'hold' and abs(-self.pos.z + y['z']) < 0.7 \
+                and dv >= self.sep_v - 0.25:
+            y['stage'] = 'pass'
+            self.get_logger().info(
+                f"SEPARATION: vertically clear of peer {y['peer']} ({dv:.1f} m) at "
+                f"{-y['z']:.1f} m -> continuing my route at that altitude")
+
+        if not (hit and hit[3]):
+            if gone or dh >= clear_h or (y['stage'] == 'clear' and dv >= self.sep_v + 1.0):
+                y['clear_since'] = y['clear_since'] or now
+                if now - y['clear_since'] >= self.sep_clear_s:
                     self.get_logger().info(
-                        f"SEPARATION: peer {self.yielding['peer']} clear"
-                        f"{' (silent)' if gone else ''} -> resuming")
+                        f"SEPARATION: peer {y['peer']} clear{' (silent)' if gone else ''} "
+                        f"after {now - y['t0']:.0f} s -> back to survey altitude")
+                    self.last_yield[y['peer']] = now
                     self.yielding = None
                     return False
             else:
-                self.yielding['clear_since'] = None
-        if self.yielding:
-            y = self.yielding
+                y['clear_since'] = None
+        if now - y['t0'] > 60.0 and not y['warned']:
+            y['warned'] = True
+            self.get_logger().warn(f"SEPARATION: still yielding to peer {y['peer']} after 60 s")
+
+        if y['stage'] == 'clear':
+            if not gone and dh < clear_h:
+                side = (0.0, 1.0 if self.me > y['peer'] else -1.0)
+                tn, te = sl.escape_point(me[:2], (p.north, p.east), clear_h + 0.5, side,
+                                         peer_vel=(p.vn, p.ve))
+                y['x'], y['y'] = self.pos.x, self.pos.y
+                self.send_sp_limited(tn, te - self.my_east0, y['z'], float('nan'))
+            else:
+                self.send_sp(y['x'], y['y'], y['z'], float('nan'))
+        elif y['stage'] == 'hold':
             self.send_sp(y['x'], y['y'], y['z'], float('nan'))
-            return True
-        return False
+        elif self.phase == Phase.HOLD:
+            self.send_sp(self.hold_xy[0], self.hold_xy[1], y['z'], float('nan'))
+        else:
+            w = self.wp[self.wp_idx]
+            self.send_sp_limited(w['x'], w['y'], y['z'], self.course_yaw(self.wp_idx))
+        return True
+
+    def _yield_vertical(self, y, me, p, why):
+        """CLEAR -> HOLD: go over or under a peer that is holding its altitude."""
+        alt = sl.yield_altitude(me[2], p.alt, self.sep_v, self.sep_climb)
+        if abs(alt - p.alt) < self.sep_v:
+            y['no_pass'] = True
+            self.get_logger().warn(
+                f"SEPARATION: peer {y['peer']} {why}, but there is no room to pass "
+                f"under it - keeping horizontal separation")
+            return
+        y.update(stage='hold', x=self.pos.x, y=self.pos.y, z=-alt)
+        self.get_logger().warn(
+            f"SEPARATION: peer {y['peer']} {why} and holding its altitude -> going to "
+            f"{alt:.1f} m to pass {'over' if alt > p.alt else 'under'} it")
 
     # ---------- swarm: what next, once the current work is done ----------
     def next_work(self, now):
@@ -812,14 +943,22 @@ class SurveyNode(Node):
         return False
 
     def gate_open(self, w):
-        """Swarm gate: on a lane, near survey altitude (with hysteresis), not
-        yielding. Covers own lanes and takeover lanes; closed in transit."""
-        if not self.pos_valid or self.yielding or w['kind'] not in LANE_KINDS:
+        """Swarm gate: flying ALONG a lane (heading for its lane_end), near
+        survey altitude (with hysteresis), not yielding. Closed in the turn
+        between lanes (banking and yawing - the worst case for geotagging) and
+        in transit."""
+        if not self.pos_valid or self.yielding or w['kind'] != 'lane_end' \
+                or not self.over_area():
             self.gate_alt_ok = False
             return False
         err = abs(-self.pos.z - self.altitude)
         self.gate_alt_ok = err < (2.0 if self.gate_alt_ok else 1.0)
         return self.gate_alt_ok
+
+    def over_area(self):
+        """Over the survey area along-track - off the lead-in and run-out,
+        where the drone is still settling from the turn or already braking."""
+        return self.pos_valid and self.x_min <= self.pos.x <= self.x_max
 
     def on_waypoint_reached(self, w):
         if w['kind'] != 'lane_end':
@@ -910,7 +1049,7 @@ class SurveyNode(Node):
             # Bearing is taken to the TRUE waypoint, never to the carrot: the
             # carrot converges onto the drone near arrival, where the bearing
             # between them is numerically unstable and can flip 180 degrees.
-            self.send_sp_limited(tx, ty, tz, self.desired_yaw(tx, ty))
+            self.send_sp_limited(tx, ty, tz, self.course_yaw(self.wp_idx))
             if self.swarm:
                 self.publish_detecting(self.gate_open(w))
             else:
@@ -921,7 +1060,10 @@ class SurveyNode(Node):
                 # turn, spamming the log and republishing on every tick.
                 if self.pos_valid and -self.pos.z >= 0.8 * self.altitude:
                     self.reached_alt = True
-                self.publish_detecting(self.wp_idx >= 1 and self.reached_alt)
+                # Only along a lane - closed in the turn between lanes, where the
+                # drone banks and yaws.
+                self.publish_detecting(w['kind'] == 'lane_end' and self.reached_alt
+                                       and self.over_area())
             if self.pos_valid:
                 d = self.dist_to(tx, ty, tz)
                 self.wp_min_dist[self.wp_idx] = min(self.wp_min_dist[self.wp_idx], d)
@@ -967,6 +1109,7 @@ class SurveyNode(Node):
             return
 
         if self.phase == Phase.RETURN_WAIT:
+            self.check_landing_away_from_home()
             if self.pos_valid and self.home_dist() <= self.return_tol:
                 self.returned = True
                 self.get_logger().info(f"returned home (d={self.home_dist():.2f} m)")
@@ -975,6 +1118,27 @@ class SurveyNode(Node):
                 self.get_logger().warn("return timed out")
                 self.finish(False, reason="return timeout")
             return
+
+    LANDING_STATES = (VehicleStatus.NAVIGATION_STATE_AUTO_LAND,
+                      VehicleStatus.NAVIGATION_STATE_DESCEND,
+                      VehicleStatus.NAVIGATION_STATE_AUTO_PRECLAND)
+
+    def check_landing_away_from_home(self):
+        """Over a minefield the drone must only ever land at home. PX4 can still
+        decide otherwise (battery EMERGENCY, position loss) - say so loudly,
+        with the spot, rather than reporting a plain 'return timeout' later."""
+        if (getattr(self, '_landing_flagged', False) or not self.pos_valid
+                or self.status.nav_state not in self.LANDING_STATES
+                or self.home_dist() <= self.return_tol):
+            return
+        self._landing_flagged = True
+        east0 = self.my_east0 if self.swarm else 0.0
+        self.end_reason = 'PX4 LANDING AWAY FROM HOME'
+        self.get_logger().error(
+            f"PX4 IS LANDING AWAY FROM HOME (nav_state {self.status.nav_state}) at "
+            f"N={self.pos.x:.1f} E={self.pos.y + east0:.1f} (shared frame), "
+            f"{self.home_dist():.0f} m from home - if that is inside the survey "
+            f"area, the aircraft is down in uncleared ground")
 
     # ---------- verification / shutdown ----------
     def check_waypoints(self):

@@ -61,11 +61,11 @@ cd ~/px4_ros_ws
 colcon build --packages-select survey perception && source install/setup.bash
 
 ros2 launch survey mission.launch.py \
-    x_max:=30.0 y_max:=20.0 altitude:=5.0
+    x_max:=30.0 y_max:=20.0 altitude:=10.0
 ```
 
-`lane_spacing` is no longer passed — it derives itself from the camera footprint
-at the altitude you chose (see the argument table below).
+`lane_spacing` is no longer passed — it derives itself from the detector's
+measured swath at the altitude you chose (see the argument table below).
 
 This runs the whole Phase I loop: camera bridge + YOLO detector start first,
 then after 8 s the survey node arms, flies a boustrophedon pattern, geotags what
@@ -120,13 +120,15 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 |---|---|---|
 | `x_min/x_max/y_min/y_max` | `0/40/0/30` | Survey rectangle, PX4 local NED metres, home = 0,0 |
 | `altitude` | `15.0` | Metres AGL (the node converts to `z = -altitude`) |
-| `lane_spacing` | `0.0` | **0.0 = derive** from the camera footprint: `2·h·tan(HFOV/2)·(1−sidelap)`. At 5 m that is 8.3 m. A positive value overrides, and warns if it exceeds the footprint (which leaves unphotographed gaps) |
-| `sidelap` | `0.3` | Overlap fraction between adjacent lanes when deriving |
+| `lane_spacing` | `0.0` | **0.0 = derive** from the detection swath: `2·h·tan(detect_fov_deg/2)·(1−sidelap)`. At 10 m that is 4.0 m. A positive value overrides, and warns if it exceeds the swath (targets between lanes can go unrecorded) |
+| `detect_fov_deg` | `28.0` | Cross-track angle in which the detector reliably scores a target. Measured for the COCO person (±2.5 m at 10 m; the camera itself sees ±11.9 m). Re-measure with `tools/analyse_sightings.py` for new weights |
+| `sidelap` | `0.2` | Overlap fraction between adjacent swaths when deriving |
+| `lead_in_m` | `6.0` | Lanes start and end this far outside the area; detection runs only over the area, once the drone is straight and level |
 | `lookahead_m` | `4.0` | **Ground-speed cap** (~0.95 × this, m/s). `0.0` = fly flat out at `MPC_XY_VEL_MAX` |
 | `rtl_on_complete` | `true` | `false` leaves the drone hovering at the end |
 | `weights` | `yolov8n.pt` | Point at `~/runs/detect/train/weights/best.pt` once you have trained weights |
 | `classes` | `person` | Comma-separated class names to keep. `''` = keep all — expect `airplane`/`kite`/`bird` junk from COCO weights on nadir ground |
-| `conf` | `0.40` | Detection confidence floor |
+| `conf` | `0.65` | Detection confidence floor. False positives on empty ground have topped out at 0.61; don't lower it without re-measuring |
 | `require_gate` | `true` | Only geotag while the survey node says it's flying lanes — no hazards logged during climb, RTL or landing |
 | `pose_lag_s` | `0.25` | Camera+bridge latency compensated when geotagging. Replaying the first flight: 3.98 m → 0.96 m RMS combined with the speed cap. Raise toward 0.35 if along-track error is still one-sided |
 | `survey_delay` | `8.0` | Seconds to let the camera pipeline settle before the drone moves |

@@ -1,5 +1,7 @@
 """Unit tests for survey/swarm_logic.py - run: python3 -m pytest src/survey/test -q"""
 
+import math
+
 import pytest
 
 from survey import swarm_logic as sl
@@ -11,8 +13,19 @@ def peer(i, state=sl.SURVEY, done=0, total=3, claimed=-1, frm=0, mask=0,
 
 
 # ---------------------------------------------------------------- geometry
-def test_lanes_match_survey_node_rule():
-    assert sl.lane_offsets(30.0, 16.59) == pytest.approx([0.0, 16.59, 30.0])
+def test_lanes_are_strip_centred_and_off_the_boundary():
+    assert sl.lane_offsets(30.0, 16.59) == pytest.approx([7.5, 22.5])
+
+
+@pytest.mark.parametrize('width,spacing', [(30, 16.59), (20, 16.59), (90, 16.59), (7, 16.59),
+                                           (45, 10.0), (33.2, 16.6)])
+def test_lanes_keep_the_sidelap_everywhere_including_across_bands(width, spacing):
+    ys = sl.lane_offsets(width, spacing)
+    gaps = [b - a for a, b in zip(ys, ys[1:])]
+    assert all(g <= spacing + 1e-9 for g in gaps)
+    # half a strip to each band edge, so lane-to-lane across a boundary is also <= spacing
+    assert ys[0] <= spacing / 2 + 1e-9 and width - ys[-1] <= spacing / 2 + 1e-9
+    assert all(0 < y < width for y in ys)              # never ON a band boundary
 
 
 def test_band_origins():
@@ -36,34 +49,78 @@ def test_eta_counts_distance_and_turns():
 
 
 # -------------------------------------------------------------- separation
-def test_lower_id_keeps_right_of_way():
-    hit = sl.separation_conflict(1, (0, 30, 10), [(0, sl.SURVEY, 2, 30, 10, 0.2)], 8, 5, 1.5)
+def test_lower_id_keeps_right_of_way_between_working_drones():
+    hit = sl.separation_conflict(1, sl.SURVEY, (0, 30, 10), [(0, sl.SURVEY, 2, 30, 10, 0.2)], 8, 5, 1.5)
     assert hit[0] == 0 and hit[3] is True          # drone 1 yields to drone 0
-    hit = sl.separation_conflict(0, (2, 30, 10), [(1, sl.SURVEY, 0, 30, 10, 0.2)], 8, 5, 1.5)
+    hit = sl.separation_conflict(0, sl.SURVEY, (2, 30, 10), [(1, sl.SURVEY, 0, 30, 10, 0.2)], 8, 5, 1.5)
     assert hit[3] is False                          # drone 0 carries on
 
 
+def test_idle_drone_in_hold_gives_way_to_a_working_one_regardless_of_id():
+    # drone 0 parked in HOLD where drone 1's lane passes: drone 0 moves
+    assert sl.separation_conflict(0, sl.HOLD, (0, 30, 10),
+                                  [(1, sl.SURVEY, 1, 30, 10, 0.2)], 8, 5, 1.5)[3] is True
+    assert sl.separation_conflict(1, sl.SURVEY, (1, 30, 10),
+                                  [(0, sl.HOLD, 0, 30, 10, 0.2)], 8, 5, 1.5)[3] is False
+
+
+def test_a_working_drone_that_is_yielding_keeps_its_priority_over_idle_peers():
+    # me: working (underlying SURVEY) even while I broadcast YIELD; peer idle in HOLD
+    assert sl.separation_conflict(2, sl.SURVEY, (0, 0, 10),
+                                  [(0, sl.HOLD, 3, 0, 12, 0.2)], 8, 5, 1.5)[3] is False
+
+
 def test_peer_under_px4_control_cannot_be_asked_to_move():
-    hit = sl.separation_conflict(0, (0, 0, 10), [(2, sl.RETURNING, 3, 0, 11, 0.2)], 8, 5, 1.5)
+    hit = sl.separation_conflict(0, sl.SURVEY, (0, 0, 10), [(2, sl.RETURNING, 3, 0, 11, 0.2)], 8, 5, 1.5)
     assert hit[3] is True
 
 
 def test_peer_already_yielding_to_me():
-    hit = sl.separation_conflict(0, (0, 0, 10), [(1, sl.YIELD, 3, 0, 12, 0.2)], 8, 5, 1.5)
+    hit = sl.separation_conflict(0, sl.SURVEY, (0, 0, 10), [(1, sl.YIELD, 3, 0, 12, 0.2)], 8, 5, 1.5)
     assert hit[3] is False
 
 
 def test_outside_cylinder_or_stale_is_ignored():
-    assert sl.separation_conflict(0, (0, 0, 10), [(1, sl.SURVEY, 9, 0, 10, 0.2)], 8, 5, 1.5) is None
-    assert sl.separation_conflict(0, (0, 0, 10), [(1, sl.SURVEY, 1, 0, 16, 0.2)], 8, 5, 1.5) is None
-    assert sl.separation_conflict(0, (0, 0, 10), [(1, sl.SURVEY, 1, 0, 10, 9.0)], 8, 5, 1.5) is None
+    sc = sl.separation_conflict
+    assert sc(0, sl.SURVEY, (0, 0, 10), [(1, sl.SURVEY, 9, 0, 10, 0.2)], 8, 5, 1.5) is None
+    assert sc(0, sl.SURVEY, (0, 0, 10), [(1, sl.SURVEY, 1, 0, 16, 0.2)], 8, 5, 1.5) is None
+    assert sc(0, sl.SURVEY, (0, 0, 10), [(1, sl.SURVEY, 1, 0, 10, 9.0)], 8, 5, 1.5) is None
 
 
 def test_yield_never_climbs_through_the_other_drone():
-    assert sl.yield_altitude(5.0, 10.0, 5, 5) == 5.0      # below it: stay below
-    assert sl.yield_altitude(8.0, 10.0, 5, 5) == 5.0      # open the gap downwards
-    assert sl.yield_altitude(10.0, 10.0, 5, 5) == 15.0    # level with it: go over
-    assert sl.yield_altitude(4.0, 6.0, 5, 5, min_alt=3) == 3.0
+    assert sl.yield_altitude(3.5, 10.0, 5, 5) == 3.5      # below it with room: stay
+    assert sl.yield_altitude(5.0, 10.0, 5, 5) == 4.0      # open the gap + margin
+    assert sl.yield_altitude(8.0, 10.0, 5, 5) == 4.0
+    assert sl.yield_altitude(10.0, 10.0, 5, 5) == 16.0    # level with it: go over
+    assert sl.yield_altitude(10.0, 10.0, 5, 8) == 18.0    # a bigger climb is kept
+    assert sl.yield_altitude(4.0, 6.0, 5, 5, min_alt=3) == 3.0   # capped: gap < sep_v
+
+
+def test_escape_point_moves_away_on_my_side():
+    n, e = sl.escape_point((0.0, 3.0), (0.0, 0.0), 10.0)
+    assert (n, e) == pytest.approx((0.0, 10.0))
+    n, e = sl.escape_point((-4.6, 31.3), (-5.0, 28.1), 10.0)   # 2 Oct: 3.3 m apart
+    assert math.hypot(n + 5.0, e - 28.1) == pytest.approx(10.0) and e > 31.3
+    assert sl.escape_point((1.0, 1.0), (1.0, 1.1), 10.0, fallback=(1.0, 0.0)) == \
+        pytest.approx((11.0, 1.1))
+
+
+def test_escape_from_a_moving_peer_steps_off_its_line():
+    # peer flying north at 3.7 m/s straight at me, 5 m ahead of it
+    n, e = sl.escape_point((5.0, 0.0), (0.0, 0.0), 10.0, fallback=(0.0, 1.0),
+                           peer_vel=(3.7, 0.0))
+    assert (n, e) == pytest.approx((5.0, 10.0))          # sideways, not backwards
+    n, e = sl.escape_point((5.0, -2.0), (0.0, 0.0), 10.0, peer_vel=(3.7, 0.0))
+    assert (n, e) == pytest.approx((5.0, -10.0))         # already left of it: go left
+
+
+def test_peer_climb_rate_from_heartbeats():
+    c = sl.SwarmCoordinator(1, 3, 3, peer_timeout_s=3, startup_grace_s=45,
+                            deadline_margin_s=15, min_takeover_battery=30, claim_wait_s=20)
+    for k in range(8):                              # RTL climb at 3 m/s, 4 Hz
+        c.update(peer(0, sl.RETURNING, alt=10 + 0.75 * k, rx=100 + 0.25 * k))
+    assert c.peers[0].vz == pytest.approx(3.0, abs=0.1)
+    assert c.peers[0].vn == pytest.approx(0.0) and c.peers[0].ve == pytest.approx(0.0)
 
 
 # ---------------------------------------------------------------- takeover

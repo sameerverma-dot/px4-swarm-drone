@@ -302,12 +302,16 @@ tmux select-layout -t "$SESSION:sim" tiled
                 sleep 1
             done
             sleep 2
+            # COM_LOW_BAT_ACT 3: return at CRITICAL battery. Default 0 is warning
+            # only - PX4 itself would fly on until the emergency level forces a
+            # landing wherever it is, which over a minefield is in the field.
             # COM_OBL_RC_ACT 3: if the onboard computer stops sending offboard
             # setpoints (its Pi died), RETURN. The default (0, Position mode)
             # with no RC stick means hover in place forever - inside the band a
             # neighbour will later fly into to take over.
             for p in "COM_RC_IN_MODE 4" "COM_RCL_EXCEPT 7" "NAV_RCL_ACT 0" "NAV_DLL_ACT 0" \
-                     "CBRK_SUPPLY_CHK 894281" "RTL_RETURN_ALT $rtl_alt" "COM_OBL_RC_ACT 3"; do
+                     "CBRK_SUPPLY_CHK 894281" "RTL_RETURN_ALT $rtl_alt" "COM_OBL_RC_ACT 3" \
+                     "COM_LOW_BAT_ACT 3"; do
                 tmux send-keys -t "$pane" "param set $p" Enter
                 sleep 0.4
             done

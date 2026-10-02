@@ -73,7 +73,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'lane_spacing', default_value='0.0',
             description='0.0 derives it from the camera footprint at this altitude'),
-        DeclareLaunchArgument('sidelap', default_value='0.3'),
+        DeclareLaunchArgument('sidelap', default_value='0.2'),
         DeclareLaunchArgument(
             'yaw_mode', default_value='course',
             description="course = face direction of travel; fixed = locked to "

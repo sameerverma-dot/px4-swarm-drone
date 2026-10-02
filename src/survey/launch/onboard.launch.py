@@ -30,12 +30,13 @@ ARGS = {
     'world': 'default', 'model': 'x500_mono_cam_down',
     'run_dir': '~/maps',
     # flight
-    'altitude': '10.0', 'lane_spacing': '0.0', 'sidelap': '0.3',
+    'altitude': '10.0', 'lane_spacing': '0.0', 'sidelap': '0.2', 'detect_fov_deg': '28.0',
     'yaw_mode': 'course', 'fixed_yaw_deg': '0.0', 'yaw_deadzone_m': '1.0',
-    'lookahead_m': '4.0', 'rtl_on_complete': 'true', 'survey_delay': '8.0',
+    'lookahead_m': '4.0', 'lead_in_m': '6.0', 'rtl_on_complete': 'true', 'survey_delay': '8.0',
     # detection
     'weights': 'yolov8n.pt', 'conf': '0.65', 'classes': 'person', 'imgsz': '1280',
-    'pose_lag_s': '0.25', 'max_alt_m': '40.0', 'min_sep_m': '4.5',
+    'pose_lag_s': '0.25', 'max_alt_m': '40.0', 'min_sep_m': '1.5',
+    'use_attitude': 'true',
     # swarm
     'heartbeat_topic': '/swarm/heartbeat', 'hazard_topic': '/swarm/hazards',
     'takeover': 'true', 'separation': 'true',
@@ -79,6 +80,8 @@ def _setup(context, *args, **kwargs):
                         'classes': g['classes'], 'imgsz': int(g['imgsz']),
                         'pose_lag_s': f(g['pose_lag_s']), 'max_alt_m': f(g['max_alt_m']),
                         'min_sep_m': f(g['min_sep_m']), 'require_gate': True,
+                        'use_attitude': b(g['use_attitude']),
+                        'sightings_csv': os.path.join(run_dir, f'sightings_d{i}.csv'),
                     }])
 
     survey = Node(package='survey', executable='survey_node',
@@ -90,10 +93,11 @@ def _setup(context, *args, **kwargs):
                       'namespace': ns, 'detect_topic': gate,
                       'csv_dir': run_dir, 'csv_prefix': f'survey_track_d{i}',
                       'altitude': f(g['altitude']), 'lane_spacing': f(g['lane_spacing']),
-                      'sidelap': f(g['sidelap']), 'yaw_mode': g['yaw_mode'],
+                      'sidelap': f(g['sidelap']), 'detect_fov_deg': f(g['detect_fov_deg']),
+                      'yaw_mode': g['yaw_mode'],
                       'fixed_yaw_deg': f(g['fixed_yaw_deg']),
                       'yaw_deadzone_m': f(g['yaw_deadzone_m']),
-                      'lookahead_m': f(g['lookahead_m']),
+                      'lookahead_m': f(g['lookahead_m']), 'lead_in_m': f(g['lead_in_m']),
                       'rtl_on_complete': b(g['rtl_on_complete']),
                       'heartbeat_topic': g['heartbeat_topic'],
                       'takeover': b(g['takeover']), 'separation': b(g['separation']),

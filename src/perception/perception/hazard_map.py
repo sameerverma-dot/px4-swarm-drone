@@ -127,6 +127,9 @@ def read_hazards(path):
                     'drone': (r.get('drone') or '').strip(),
                     'id': (r.get('hazard_id') or '').strip(),
                     'status': (r.get('status') or '').strip(),
+                    'version': int(r.get('version') or 0),
+                    'n': int(r.get('n_sightings') or 1),
+                    'spread': float(r.get('spread_m') or 0.0),
                 })
             except (KeyError, TypeError, ValueError):
                 continue
@@ -144,24 +147,33 @@ def run_mtime(run_dir):
     return max(os.path.getmtime(p) for p in glob.glob(os.path.join(run_dir, '*')))
 
 
-def read_run_hazards(run_dir):
-    """Every drone's onboard log plus the ground copy, merged by hazard_id.
+def collapse_hazards(rows):
+    """One row per hazard: its highest-version (most refined) position.
 
-    Each drone logs its own finds AND its peers', so the files overlap by
-    design; an id marked 'superseded' anywhere (two drones logged the same
-    object, the other report was canonical) is dropped everywhere."""
+    Logs are append-only - a hazard's first sighting, then refinements
+    ('update' / 'peer_update'), and every drone logs its peers' hazards too.
+    An id marked 'superseded' anywhere (two drones logged the same object, the
+    other report was canonical) is dropped everywhere. Rows without a
+    hazard_id (pre-swarm logs) pass through unchanged."""
+    dead = {r['id'] for r in rows if r['status'] == 'superseded'}
+    best, legacy = {}, []
+    for r in rows:
+        if not r['id']:
+            legacy.append(r)
+        elif r['id'] not in dead:
+            cur = best.get(r['id'])
+            if cur is None or r['version'] > cur['version']:
+                best[r['id']] = dict(r, t=min(r['t'], cur['t']) if cur else r['t'])
+    return legacy + sorted(best.values(), key=lambda r: r['t'])
+
+
+def read_run_hazards(run_dir):
+    """Every drone's onboard log plus the ground copy, collapsed per hazard."""
     rows = []
     for p in sorted(glob.glob(os.path.join(run_dir, 'hazards_d*.csv'))) + \
             glob.glob(os.path.join(run_dir, 'ground_hazards.csv')):
         rows += read_hazards(p)
-    dead = {r['id'] for r in rows if r['status'] == 'superseded'}
-    out, seen = [], set()
-    for r in sorted(rows, key=lambda r: r['t']):
-        if r['id'] in dead or r['id'] in seen or r['status'] == 'superseded':
-            continue
-        seen.add(r['id'])
-        out.append(r)
-    return out
+    return collapse_hazards(rows)
 
 
 def ned_to_wgs84(north, east, home_lat, home_lon):
@@ -334,11 +346,11 @@ def main(argv=None):
     track = [pt for pts in track_pts.values() for pt in pts]
     track_path = paths[-1]
     if a.hazards:
-        hazards = read_hazards(os.path.expanduser(a.hazards))
+        hazards = collapse_hazards(read_hazards(os.path.expanduser(a.hazards)))
     elif run_dir:
         hazards = read_run_hazards(run_dir)
     else:
-        hazards = read_hazards(os.path.join(maps_dir, 'hazard_points.csv'))
+        hazards = collapse_hazards(read_hazards(os.path.join(maps_dir, 'hazard_points.csv')))
 
     n_raw = len(hazards)
     if a.classes:
@@ -518,11 +530,12 @@ def main(argv=None):
     for label, p, off in tracks:
         print(f"  track {label or ''}: {os.path.basename(p)}"
               + (f"  (shifted east {off:+.1f} m)" if off else ""))
-    print(f"\n  {'#':>3}  {'class':<10} {'conf':>5}  {'North':>8} {'East':>8}  {'alt':>6}  {'drone':>5}")
-    print(f"  {'-'*3}  {'-'*10} {'-'*5}  {'-'*8} {'-'*8}  {'-'*6}  {'-'*5}")
+    print(f"\n  {'#':>3}  {'class':<10} {'conf':>5}  {'North':>8} {'East':>8}  {'alt':>6}  {'drone':>5}  {'seen':>4} {'spread':>6}")
+    print(f"  {'-'*3}  {'-'*10} {'-'*5}  {'-'*8} {'-'*8}  {'-'*6}  {'-'*5}  {'-'*4} {'-'*6}")
     for i, h in enumerate(hazards, 1):
         print(f"  {i:>3}  {h['cls']:<10} {h['conf']:>5.2f}  "
-              f"{h['north']:>8.2f} {h['east']:>8.2f}  {h['alt']:>5.1f}m  {h['drone']:>5}")
+              f"{h['north']:>8.2f} {h['east']:>8.2f}  {h['alt']:>5.1f}m  {h['drone']:>5}  "
+              f"{h.get('n', 1):>4} {h.get('spread', 0.0):>5.2f}m")
     if not hazards:
         print("   (none)")
     if scores:

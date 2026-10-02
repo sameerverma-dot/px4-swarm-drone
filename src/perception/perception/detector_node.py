@@ -91,7 +91,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
-from px4_msgs.msg import VehicleLocalPosition
+from px4_msgs.msg import VehicleAttitude, VehicleLocalPosition
 from swarm_msgs.msg import HazardReport
 
 from perception.hazard_registry import Hazard, HazardRegistry
@@ -105,6 +105,26 @@ try:
     from ultralytics import YOLO
 except ImportError as e:  # pragma: no cover
     raise SystemExit("ultralytics not found - install with: pip install --user ultralytics") from e
+
+
+
+def quat_rotate(q, v):
+    """Rotate vector v by unit quaternion q = (w, x, y, z), Hamilton convention."""
+    w, x, y, z = q
+    vx, vy, vz = v
+    # v' = v + 2 w (q_v x v) + 2 q_v x (q_v x v)
+    cx, cy, cz = y * vz - z * vy, z * vx - x * vz, x * vy - y * vx
+    ccx, ccy, ccz = y * cz - z * cy, z * cx - x * cz, x * cy - y * cx
+    return (vx + 2 * (w * cx + ccx), vy + 2 * (w * cy + ccy), vz + 2 * (w * cz + ccz))
+
+
+def quat_euler(q):
+    """(roll, pitch, yaw) in radians from (w, x, y, z), aerospace ZYX."""
+    w, x, y, z = q
+    roll = math.atan2(2 * (w * x + y * z), 1 - 2 * (x * x + y * y))
+    pitch = math.asin(max(-1.0, min(1.0, 2 * (w * y - z * x))))
+    yaw = math.atan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z))
+    return roll, pitch, yaw
 
 
 class DetectorNode(Node):
@@ -126,8 +146,25 @@ class DetectorNode(Node):
         # 1280 px / 10 m the 8 Sep flight put three hits on ONE person at
         # 0.78 / 2.44 / 3.08 m from truth (RMS 2.31 m), spaced 2.3-3.9 m apart -
         # all just outside 2.0, so one person was logged as THREE hazards.
-        # 4.5 ~= 2 x 2.31. Lower it if you fly lower/slower and re-measure.
-        self.declare_parameter('min_sep_m', 4.5)            # dedup radius (metres)
+        # 4.5 ~= 2 x 2.31 was the fix then - and it merged real objects 2-4 m
+        # apart. With attitude-aware projection, frames from turns dropped
+        # (max_rate_dps) and duplicate boxes merged (box_merge_m), the 2 Oct
+        # calibration measured steady-flight scatter at 0.36 m RMS, 0.85 m max,
+        # and error to truth at most 1.4 m (tools/analyse_sightings.py). 2.5 m
+        # covers one drone's scatter and two drones disagreeing about one object,
+        # and keeps objects >= 2.5 m apart separate even when seen in separate
+        # frames (in the same frame they stay separate down to box_merge_m).
+        #
+        # Then 2.5 merged a real pair 2 m apart: seen far ahead, YOLO boxed both
+        # people as one (fix at their midpoint), and a later view of one of them
+        # alone fell within 2.5 m of it. A merged mine is a live mine missing
+        # from the map; a duplicate is a second flag next to a real one. So err
+        # to duplicates: 1.5 m, ~2x the 0.85 m worst steady scatter, with
+        # near-nadir views weighted up (see record weights in process_frame).
+        self.declare_parameter('min_sep_m', 1.5)            # dedup radius (metres)
+        # Two boxes in ONE frame closer than this on the ground are one object
+        # boxed twice (whole + part), not two objects. See hazard_registry.py.
+        self.declare_parameter('box_merge_m', 1.0)
         self.declare_parameter('classes', '')               # '' = all; else CSV of names to keep
         self.declare_parameter('device', '')                # '' = auto (cuda if available), else 'cuda:0'/'cpu'
         # Inference size. Camera capture is 1280x960 (mono_cam SDF) - imgsz must
@@ -168,6 +205,25 @@ class DetectorNode(Node):
         # peers over that topic (see hazard_registry.py). Both off by default.
         self.declare_parameter('drone_id', -1)
         self.declare_parameter('swarm_hazard_topic', '')
+        # Refined positions are re-broadcast at most this often per hazard.
+        self.declare_parameter('broadcast_period_s', 1.0)
+        # --- geolocation model ---
+        # Rotate the camera ray by the drone's full attitude (roll, pitch, yaw)
+        # instead of assuming level flight. Forward pitch at survey speed tilts a
+        # fixed nadir camera backward, which a level-flight projection turns into
+        # a consistent along-track error. False = old level-flight projection.
+        self.declare_parameter('use_attitude', True)
+        # Do not record while the drone is rotating faster than this (deg/s,
+        # from the attitude 0.1 s either side of the frame). Turning onto a lane
+        # it banks 20+ deg and yaws ~140 deg/s; a few tens of ms of timing error
+        # is then several degrees, and those frames put a person directly under
+        # the lane 5 m off (2 Oct). Steady survey flight is < 10 deg/s. 0 = off.
+        self.declare_parameter('max_rate_dps', 30.0)
+        # Every person box in a gated frame - recorded ones, and the ones below
+        # threshold or dropped while turning (outcome 'below' / 'turning') -
+        # with the pose, velocity and attitude it was geotagged with. Input to
+        # tools/analyse_sightings.py (swath, timing, scatter). '' = off.
+        self.declare_parameter('sightings_csv', '')
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -180,6 +236,11 @@ class DetectorNode(Node):
         self.min_sep = float(gp('min_sep_m').value)
         self.drone_id = int(gp('drone_id').value)
         self.swarm_hazard_topic = str(gp('swarm_hazard_topic').value).strip()
+        self.broadcast_period = float(gp('broadcast_period_s').value)
+        self.use_attitude = bool(gp('use_attitude').value)
+        self.max_rate = max(0.0, float(gp('max_rate_dps').value))
+        self.box_merge = max(0.0, float(gp('box_merge_m').value))
+        self.sightings_csv = os.path.expanduser(str(gp('sightings_csv').value).strip())
         self.imgsz = int(gp('imgsz').value)
         self.half_req = bool(gp('half').value)
         self.pose_lag = float(gp('pose_lag_s').value)
@@ -292,9 +353,12 @@ class DetectorNode(Node):
                 'annotated_topic': annot_topics[i] if n == 1 else self._per_drone_topic(annot_topics[i], i, n),
                 'offset_n': on, 'offset_e': oe,
                 # pose ring buffer (time-matched geolocation, docstring point 1):
-                # wall-clock keyed, entries (t, x, y, z, heading). ~10 s at 50 Hz.
+                # wall-clock keyed, entries (x, y, z, heading, vx, vy). ~10 s at 50 Hz.
                 'pose_t': deque(maxlen=600),
                 'pose_v': deque(maxlen=600),
+                # attitude ring buffer, same keying: quaternion (w, x, y, z) FRD->NED
+                'att_t': deque(maxlen=1200),
+                'att_v': deque(maxlen=1200),
                 # detection gate (docstring point 2)
                 'gate': not self.require_gate,
                 'gate_seen': False,
@@ -310,9 +374,19 @@ class DetectorNode(Node):
                     f"gate='{d['gate_topic']}' offset=({d['offset_n']:.1f},{d['offset_e']:.1f})")
 
         self.me = self.drone_id if self.drone_id >= 0 else 0
-        self.registry = HazardRegistry(self.me, self.min_sep)
+        self.registry = HazardRegistry(self.me, self.min_sep, self.box_merge)
         self._suppressed = set()               # peer hazard ids we've reported re-seeing
         self.hazard_lock = threading.Lock()   # infer worker vs peer-report callback
+        self._published = {}                  # own hazard id -> (version, wall time) last broadcast
+        self._sight_f = None
+        if self.sightings_csv:
+            os.makedirs(os.path.dirname(self.sightings_csv), exist_ok=True)
+            self._sight_f = open(self.sightings_csv, 'w', newline='')
+            self._sight_w = csv.writer(self._sight_f)
+            self._sight_w.writerow(
+                ['t_rx', 'drone', 'u', 'v', 'img_w', 'img_h', 'conf', 'x', 'y', 'z',
+                 'vx', 'vy', 'yaw', 'roll', 'pitch', 'north', 'east', 'north_level',
+                 'east_level', 'hazard_id', 'outcome'])
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -371,6 +445,11 @@ class DetectorNode(Node):
                 self.create_subscription(
                     VehicleLocalPosition, t, partial(self.on_pos, drone_idx=i), px4_qos,
                     callback_group=self.cb_state)
+            if self.use_attitude or self.max_rate > 0:
+                for t in (f'{ns}/fmu/out/vehicle_attitude', f'{ns}/fmu/out/vehicle_attitude_v1'):
+                    self.create_subscription(
+                        VehicleAttitude, t, partial(self.on_att, drone_idx=i), px4_qos,
+                        callback_group=self.cb_state)
             self.create_subscription(
                 Bool, d['gate_topic'], partial(self.on_gate, drone_idx=i), gate_qos,
                 callback_group=self.cb_state)
@@ -410,6 +489,7 @@ class DetectorNode(Node):
         self.stats_period = max(1.0, float(gp('stats_period_s').value))
         self._stats_t0 = time.time()
         self.create_timer(self.stats_period, self.log_stats, callback_group=self.cb_state)
+        self.create_timer(0.5, self.flush_refinements, callback_group=self.cb_state)
         # Busy-ish poll: a tick with nothing waiting is a few microseconds, and a
         # tick that finds a frame runs inference back-to-back.
         self.create_timer(0.005, self.infer_tick, callback_group=self.cb_infer)
@@ -417,7 +497,8 @@ class DetectorNode(Node):
     @staticmethod
     def _new_stats():
         return {'rx': 0, 'inferred': 0, 'pose': 0, 'best': 0.0, 'best_below': 0.0,
-                'hits': 0, 'no_pose': 0, 'alt_window': 0,
+                'hits': 0, 'no_pose': 0, 'alt_window': 0, 'unsteady': 0,
+                'lag_pose': [], 'lag_att': [], 'lag_img': [],
                 't_frame': 0.0, 't_yolo': 0.0, 't_preprocess': 0.0,
                 't_inference': 0.0, 't_postprocess': 0.0}
 
@@ -442,9 +523,17 @@ class DetectorNode(Node):
                         f"{1000 * st['t_yolo'] / n:.0f} (pre {1000 * st['t_preprocess'] / n:.0f}"
                         f" / gpu {1000 * st['t_inference'] / n:.0f}"
                         f" / post {1000 * st['t_postprocess'] / n:.0f})")
-            if st['no_pose'] or st['alt_window']:
+            # Arrival delay after PX4's own timestamp (pose, att), and image
+            # delay above the period's fastest frame (img, whose stamp is sim time).
+            lags = [(k, sorted(st['lag_' + k])) for k in ('pose', 'att', 'img')]
+            if all(v for _, v in lags):
+                lags[2] = ('img+', [x - lags[2][1][0] for x in lags[2][1]])
+                msg += " | delay ms median/max: " + ", ".join(
+                    f"{k} {1000 * v[len(v) // 2]:.0f}/{1000 * v[-1]:.0f}" for k, v in lags)
+            if st['no_pose'] or st['alt_window'] or st['unsteady']:
                 msg += (f", DROPPED {st['no_pose']} no-pose / "
-                        f"{st['alt_window']} outside alt window")
+                        f"{st['alt_window']} outside alt window / "
+                        f"{st['unsteady']} turning")
             if st['no_pose'] or (d['gate'] and st['rx'] == 0):
                 self.get_logger().warn(msg + ("  <- NO CAMERA FRAMES" if st['rx'] == 0 else ""))
             else:
@@ -502,9 +591,20 @@ class DetectorNode(Node):
             return
         d = self.drones[drone_idx]
         d['st']['pose'] += 1
+        now = time.time()
+        d['st']['lag_pose'].append(now - msg.timestamp * 1e-6)
         with self.pose_lock:    # pose_at() reads these from the image thread
-            d['pose_t'].append(time.time())
-            d['pose_v'].append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading)))
+            d['pose_t'].append(now)
+            d['pose_v'].append((float(msg.x), float(msg.y), float(msg.z), float(msg.heading),
+                                float(msg.vx), float(msg.vy)))
+
+    def on_att(self, msg, drone_idx=0):
+        d = self.drones[drone_idx]
+        now = time.time()
+        d['st']['lag_att'].append(now - msg.timestamp * 1e-6)
+        with self.pose_lock:
+            d['att_t'].append(now)
+            d['att_v'].append(tuple(float(v) for v in msg.q))
 
     def on_gate(self, msg, drone_idx=0):
         d = self.drones[drone_idx]
@@ -514,21 +614,40 @@ class DetectorNode(Node):
         d['gate'] = new
         d['gate_seen'] = True
 
+    def _nearest(self, ts, vs, t, max_dt):
+        if not ts:
+            return None
+        i = bisect.bisect_left(ts, t)
+        cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
+        j = min(cand, key=lambda k: abs(ts[k] - t))
+        return vs[j] if abs(ts[j] - t) <= max_dt else None
+
     def pose_at(self, t, drone_idx=0):
         """Nearest buffered pose (for the given drone) to wall-clock time t.
         None if that drone's buffer is empty or the closest sample is more
         than 0.5 s away (stale/no telemetry)."""
         d = self.drones[drone_idx]
         with self.pose_lock:
-            ts = d['pose_t']
-            if not ts:
-                return None
-            i = bisect.bisect_left(ts, t)
-            cand = [j for j in (i - 1, i) if 0 <= j < len(ts)]
-            j = min(cand, key=lambda k: abs(ts[k] - t))
-            if abs(ts[j] - t) > 0.5:
-                return None
-            return d['pose_v'][j]
+            return self._nearest(d['pose_t'], d['pose_v'], t, 0.5)
+
+    def att_at(self, t, drone_idx=0):
+        """Attitude quaternion nearest t, or None if none within 0.1 s
+        (attitude changes fast; a stale one is worse than assuming level)."""
+        d = self.drones[drone_idx]
+        with self.pose_lock:
+            return self._nearest(d['att_t'], d['att_v'], t, 0.1)
+
+    def turn_rate(self, t, drone_idx=0):
+        """Rotation rate (deg/s) around time t from the attitude 0.1 s either
+        side, or None if the buffer does not cover it."""
+        d = self.drones[drone_idx]
+        with self.pose_lock:
+            q0 = self._nearest(d['att_t'], d['att_v'], t - 0.1, 0.05)
+            q1 = self._nearest(d['att_t'], d['att_v'], t + 0.1, 0.05)
+        if q0 is None or q1 is None:
+            return None
+        dot = min(1.0, abs(sum(a * b for a, b in zip(q0, q1))))
+        return math.degrees(2.0 * math.acos(dot)) / 0.2
 
     def img_to_np(self, msg):
         """sensor_msgs/Image -> HxWx3 BGR numpy (handles rgb8/bgr8).
@@ -562,41 +681,58 @@ class DetectorNode(Node):
         m.data = array.array('B', frame.tobytes())
         return m
 
-    def project_to_ground(self, u, v, img_w, img_h, pose):
+    def project_to_ground(self, u, v, img_w, img_h, pose, q=None):
         """
-        Approx nadir projection: pixel (u,v) -> (north, east) in local NED, using
-        the pose the frame was actually taken at (not the latest one).
+        Pixel (u,v) -> (north, east) in local NED: the camera ray, rotated into
+        NED, intersected with flat ground at home altitude - using the pose the
+        frame was actually taken at (not the latest one).
+
+        Camera mounting (x500_mono_cam_down: mono_cam pitched 90 deg about body
+        Y): optical axis = body down, image up = body forward, image right = body
+        right. In body FRD a pixel's ray is (fwd, right, 1) with
+        fwd = -(v - cy)/f, right = (u - cx)/f, f = (img_w/2)/tan(hfov/2).
+
+        q = attitude quaternion (w, x, y, z), FRD body -> NED. With q the ray is
+        rotated by the full attitude, so forward pitch at survey speed (which
+        tilts the "nadir" camera backward) no longer lands as a consistent
+        along-track error. q None = level flight at heading `yaw` - the original
+        model, and exactly what this reduces to when roll = pitch = 0.
 
         The three geo_* flags exist so a mirrored/rotated result can be corrected
-        without editing code. As of the calibration flight they should all stay
-        False: with a target at N=10 E=15, the recorded East was 14.5-14.7 (good)
-        and the North error was symmetric about the truth - latency, not axes.
+        without editing code. They should all stay False: with a target at N=10
+        E=15 the recorded East was 14.5-14.7 and the North error was symmetric
+        about the truth - latency, not axes.
         """
-        x, y, z, yaw = pose
+        x, y, z, yaw = pose[:4]
         h = -z                          # altitude above home (m); z is down
         if h < self.min_alt or h > self.max_alt:
             return None
-        mpp = (2.0 * h * math.tan(self.hfov / 2.0)) / img_w   # metres per pixel
-        du = (u - img_w / 2.0)          # +right in image
-        dv = (v - img_h / 2.0)          # +down in image
-        fwd = -dv * mpp                 # image up   -> forward
-        right = du * mpp                # image right-> right
+        f = (img_w / 2.0) / math.tan(self.hfov / 2.0)
+        fwd = -(v - img_h / 2.0) / f    # image up    -> forward
+        right = (u - img_w / 2.0) / f   # image right -> right
         if self.geo_swap:
             fwd, right = right, fwd
         if self.geo_flip_f:
             fwd = -fwd
         if self.geo_flip_r:
             right = -right
-        north = x + fwd * math.cos(yaw) - right * math.sin(yaw)
-        east = y + fwd * math.sin(yaw) + right * math.cos(yaw)
-        return north, east
+        if q is None:
+            dn = fwd * math.cos(yaw) - right * math.sin(yaw)
+            de = fwd * math.sin(yaw) + right * math.cos(yaw)
+            return x + h * dn, y + h * de
+        dn, de, dd = quat_rotate(q, (fwd, right, 1.0))
+        if dd < 0.2:                    # ray near-horizontal: no sane ground hit
+            return None
+        t = h / dd
+        return x + t * dn, y + t * de
 
     CSV_HEADER = ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m',
-                  'drone', 'hazard_id', 'status', 'logged_by']
+                  'drone', 'hazard_id', 'status', 'logged_by',
+                  'version', 'n_sightings', 'spread_m']
 
     def _open_csv(self):
-        """Append-only log. A file left by an older version (7 columns) is set
-        aside rather than appended to with a different column count."""
+        """Append-only log. A file left by an older version (different columns)
+        is set aside rather than appended to with a different column count."""
         os.makedirs(os.path.dirname(self.hazard_csv), exist_ok=True)
         if os.path.exists(self.hazard_csv):
             with open(self.hazard_csv, newline='') as f:
@@ -610,44 +746,70 @@ class DetectorNode(Node):
             csv.writer(f).writerow(self.CSV_HEADER)
 
     def _log_row(self, h, status):
+        """status: own (first sighting), update (own refinement), peer,
+        peer_update, superseded. A hazard's CURRENT position is its last row."""
         with open(self.hazard_csv, 'a', newline='') as f:
             csv.writer(f).writerow(
                 [f"{h.stamp:.1f}", f"{h.north:.2f}", f"{h.east:.2f}", h.cls,
                  f"{h.conf:.2f}", f"{h.alt:.1f}", str(h.origin), h.hazard_id,
-                 status, str(self.me)])
+                 status, str(self.me), str(h.version), str(h.n), f"{h.spread:.2f}"])
 
-    def record_hazard(self, north, east, cls, conf, alt, drone_idx=0):
-        """One registry per detector process. Onboard (one camera, swarm topic
-        set) it also holds every hazard the peers have broadcast, so an object
-        a neighbour already logged is not logged again - the band-boundary
-        case - without any ground station. See hazard_registry.py."""
+    def record_frame(self, sightings, drone_idx=0):
+        """All of one frame's geotagged detections at once, so the registry can
+        associate them one-to-one: two objects in the same frame never merge
+        (mines 1-3 m apart). See hazard_registry.py.
+        sightings: list of (north, east, alt, cls, conf, weight). -> list of
+        (outcome, hazard) per sighting."""
         origin = self.me if self.drone_id >= 0 else drone_idx
+        new, notes = [], []
         with self.hazard_lock:
-            h = self.registry.add_own(north, east, alt, cls, conf, time.time(), origin=origin)
-            if h is None:
-                # Already have one here. If a PEER logged it, say so once - that
-                # is the shared hazard list doing its job (band boundaries).
-                near = self.registry.nearest(north, east)
-                if near and near[0].origin != origin and near[0].hazard_id not in self._suppressed:
-                    self._suppressed.add(near[0].hazard_id)
-                    self.get_logger().info(
-                        f"saw {cls} {conf:.2f} at N={north:.1f} E={east:.1f} - already "
-                        f"logged by drone {near[0].origin} as {near[0].hazard_id} "
-                        f"({near[1]:.1f} m away), not logged again")
-                return False
-            self._log_row(h, 'own')
+            out = self.registry.add_frame(sightings, time.time(), origin=origin)
+            for (outcome, h) in out:
+                if outcome == 'new':
+                    self._log_row(h, 'own')
+                    new.append(h)
+                elif outcome == 'seen' and h.hazard_id not in self._suppressed:
+                    # A PEER logged it - the shared list doing its job.
+                    self._suppressed.add(h.hazard_id)
+                    notes.append(h)
             n_known = len(self.registry.items)
+        for h in new:
+            self._publish(h)
+            self.get_logger().info(
+                f"HAZARD {h.hazard_id}: {h.cls} conf={h.conf:.2f} at "
+                f"N={h.north:.1f} E={h.east:.1f} (alt {h.alt:.1f}m, drone {origin}) "
+                f"- swarm list now {n_known}")
+        for h in notes:
+            self.get_logger().info(
+                f"saw {h.cls} at N={h.north:.1f} E={h.east:.1f} - already logged by "
+                f"drone {h.origin} as {h.hazard_id}, not logged again")
+        return out
+
+    def _publish(self, h):
+        self._published[h.hazard_id] = (h.version, time.time())
         if self.pub_hazard is not None:
             self.pub_hazard.publish(self._to_report(h))
-        self.get_logger().info(
-            f"HAZARD {h.hazard_id}: {cls} conf={conf:.2f} at "
-            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m, drone {origin}) "
-            f"- swarm list now {n_known}")
-        return True
+
+    def flush_refinements(self, force=False):
+        """Re-broadcast own hazards whose position improved, at most once per
+        broadcast_period_s each, so peers converge on the refined position."""
+        now = time.time()
+        todo = []
+        with self.hazard_lock:
+            for hid, (ver, t) in list(self._published.items()):
+                h = self.registry.items.get(hid)
+                if h is None or h.version <= ver:
+                    continue
+                if force or now - t >= self.broadcast_period:
+                    self._log_row(h, 'update')
+                    todo.append(h)
+        for h in todo:
+            self._publish(h)
 
     def _to_report(self, h):
         m = HazardReport()
         m.hazard_id, m.origin_drone, m.seq = h.hazard_id, h.origin, h.seq
+        m.version, m.n_sightings, m.spread_m = h.version, h.n, float(h.spread)
         m.stamp.sec = int(h.stamp)
         m.stamp.nanosec = int((h.stamp - int(h.stamp)) * 1e9)
         m.north, m.east, m.alt = float(h.north), float(h.east), float(h.alt)
@@ -659,15 +821,18 @@ class DetectorNode(Node):
             return                      # our own broadcast coming back
         h = Hazard(m.hazard_id, m.origin_drone, m.seq,
                    m.stamp.sec + m.stamp.nanosec * 1e-9,
-                   m.north, m.east, m.alt, m.cls, m.conf)
+                   m.north, m.east, m.alt, m.cls, m.conf,
+                   version=m.version, n=m.n_sightings, spread=m.spread_m)
         with self.hazard_lock:
             outcome, superseded = self.registry.add_peer(h)
             if outcome == 'new':
                 self._log_row(h, 'peer')
+            elif outcome == 'update':
+                self._log_row(self.registry.items[h.hazard_id], 'peer_update')
             elif outcome == 'replaces':
                 self._log_row(superseded, 'superseded')
                 self._log_row(h, 'peer')
-        if outcome == 'repeat':
+        if outcome in ('repeat', 'update'):
             return
         msg = {'new': 'added to swarm list',
                'dup': 'duplicate of an earlier hazard, ignored',
@@ -684,6 +849,8 @@ class DetectorNode(Node):
         t_rx = time.time()
         d = self.drones[drone_idx]
         d['st']['rx'] += 1
+        # In sim the stamp is SIM time, so only the spread of this is meaningful.
+        d['st']['lag_img'].append(t_rx - (msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9))
         with self.frame_lock:
             d['latest'] = (msg, t_rx)
 
@@ -743,8 +910,13 @@ class DetectorNode(Node):
             st['t_' + k] += (getattr(r, 'speed', None) or {}).get(k, 0.0) / 1000.0
         img_h, img_w = frame.shape[:2]
 
-        pose = self.pose_at(t_rx - self.pose_lag, drone_idx=drone_idx)
+        t_cap = t_rx - self.pose_lag      # best estimate of when the frame was taken
+        pose = self.pose_at(t_cap, drone_idx=drone_idx)
+        q = self.att_at(t_cap, drone_idx=drone_idx) if self.use_attitude else None
+        rate = self.turn_rate(t_cap, drone_idx=drone_idx) if self.max_rate > 0 else None
+        turning = rate is not None and rate > self.max_rate
 
+        sightings, meta, below = [], [], []
         for box in r.boxes:
             cls_id = int(box.cls[0])
             name = self.model.names.get(cls_id, str(cls_id)) if hasattr(self.model, 'names') else str(cls_id)
@@ -754,12 +926,19 @@ class DetectorNode(Node):
             if self.keep is not None and name not in self.keep:
                 continue
             conf = float(box.conf[0])
-            if conf < self.conf:
-                st['best_below'] = max(st['best_below'], conf)
-                continue
-            st['best'] = max(st['best'], conf)
             x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
             u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+            if conf < self.conf:
+                st['best_below'] = max(st['best_below'], conf)
+                # Below threshold: never recorded, but logged for calibration -
+                # confidence against where in the image the object was is what
+                # sets the usable detection swath (and so the lane spacing).
+                if self._sight_f is not None and pose is not None:
+                    g = self.project_to_ground(u, v, img_w, img_h, pose, q)
+                    if g is not None:
+                        below.append((u, v, conf, g, 'below'))
+                continue
+            st['best'] = max(st['best'], conf)
 
             if annotate:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
@@ -769,17 +948,44 @@ class DetectorNode(Node):
             if pose is None:
                 st['no_pose'] += 1
                 continue
-            g = self.project_to_ground(u, v, img_w, img_h, pose)
+            g = self.project_to_ground(u, v, img_w, img_h, pose, q)
             if g is None:
                 st['alt_window'] += 1
+                continue
+            if turning:
+                st['unsteady'] += 1
+                below.append((u, v, conf, g, 'turning'))
                 continue
             # Fold this drone's own local-NED detection into the shared map
             # frame (drone 0's home) before recording it - see the
             # home_offsets note in the module docstring.
             north = g[0] + d['offset_n']
             east = g[1] + d['offset_e']
-            if self.record_hazard(north, east, name, conf, -pose[2], drone_idx=drone_idx):
-                st['hits'] += 1
+            # Weight for the hazard's position estimate: confidence x cos^2 of
+            # the off-nadir angle. Oblique views carry more attitude/height
+            # error and are where two close objects get boxed as one.
+            h2 = pose[2] * pose[2]
+            r2 = (g[0] - pose[0]) ** 2 + (g[1] - pose[1]) ** 2
+            sightings.append((north, east, -pose[2], name, conf, conf * h2 / max(h2 + r2, 1e-6)))
+            meta.append((u, v, conf, g))
+
+        out = self.record_frame(sightings, drone_idx=drone_idx) if sightings else []
+        st['hits'] += sum(1 for o, _ in out if o == 'new')
+        if self._sight_f is not None and (meta or below):
+            roll, pitch, yaw = quat_euler(q) if q is not None else (0.0, 0.0, pose[3])
+            rows = [(m, h.hazard_id, o) for m, (o, h) in zip(meta, out)] + \
+                   [(m[:4], '', m[4]) for m in below]
+            for (u, v, conf, g), hid, outcome in rows:
+                gl = self.project_to_ground(u, v, img_w, img_h, pose, None)
+                self._sight_w.writerow(
+                    [f"{t_rx:.3f}", self._label(drone_idx), f"{u:.1f}", f"{v:.1f}",
+                     img_w, img_h, f"{conf:.3f}"]
+                    + [f"{c:.3f}" for c in (pose[0], pose[1], pose[2], pose[4], pose[5],
+                                            yaw, roll, pitch,
+                                            g[0] + d['offset_n'], g[1] + d['offset_e'],
+                                            gl[0] + d['offset_n'], gl[1] + d['offset_e'])]
+                    + [hid, outcome])
+            self._sight_f.flush()
 
         if annotate:
             d['pub_annot'].publish(self.np_to_img(frame, msg.header))
@@ -798,6 +1004,12 @@ def main(args=None):
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
+        try:
+            node.flush_refinements(force=True)   # last refined positions into the log
+            if node._sight_f is not None:
+                node._sight_f.close()
+        except Exception:  # noqa: BLE001
+            pass
         try:
             node.destroy_node()
         except Exception:  # noqa: BLE001
