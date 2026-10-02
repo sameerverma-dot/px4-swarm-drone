@@ -10,14 +10,18 @@ landmines from a downward camera, and produces a geotagged hazard map.
 station; drones exchange heartbeats and hazard reports peer to peer; a drone
 that returns early or goes silent has its lanes taken over by a neighbour;
 detections are de-duplicated drone-to-drone; peers keep separation. Geotags land
-0.4–1.5 m from truth. Remaining on software: landmine weights in place of the
-COCO `person` stand-in. **Hardware (Track B) is 50 % of the grade and is at
-zero** — the project's largest risk. Details in `docs/PROGRESS.md` §11.
+0.09–0.29 m from truth (11 of 11 targets, calibrated from flight data).
+Remaining on software: landmine weights in place of the COCO `person` stand-in,
+and terrain following. **Hardware (Track B) is 50 % of the grade and is at
+zero** — the project's largest risk. Details in `docs/PROGRESS.md` §11–12.
 
-The governing constraint: detection needs ~24 px on target, which caps flight
-altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px). Altitude sets
-lane spacing, which sets flight time, which sets what the swarm buys — so read
-`docs/SWARM_PLAN.md` before changing any of them.
+The governing constraints: detection needs ~24 px on target, which caps flight
+altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px); and the detector
+finds a target reliably only within ~2.5 m of the track at 10 m (measured), so
+lanes are 4 m apart even though the camera sees 24 m across. Altitude and the
+model's swath set lane spacing, which sets flight time, which sets what the
+swarm buys — read `docs/SWARM_PLAN.md` and `docs/SYSTEM_GUIDE.md` §3.6 before
+changing any of them.
 
 ---
 
@@ -65,13 +69,14 @@ What the swarm does on its own:
 | Onboard autonomy | Flies its band, detects, logs, returns — no ground link needed |
 | Band takeover | A peer that returns early, or goes silent past its own projected finish, has its unfinished lanes flown by the nearest free drone |
 | Shared hazard list | Detections are broadcast drone-to-drone; an object a peer already logged (e.g. on a band boundary) is not logged again |
-| Separation | If a peer comes within 8 m / 5 m, the higher-id drone holds and moves vertically away until clear |
+| Separation | If a peer comes within 8 m / 5 m, the drone without right of way (working > waiting > lower id; a drone under PX4 control always has it) moves away horizontally at its own altitude; it passes over or under only a peer that holds its altitude and stays in the way |
+| Geotagging | Attitude-aware projection, frames from turns and lane ends excluded; 0.09–0.29 m against 11 known targets, a pair 2 m apart kept as two (`docs/PROGRESS.md` §12) |
 
 Try the failure cases (fault injection, per drone):
 
 ```bash
 ros2 launch survey swarm_mission.launch.py abort_after_lanes:="-1;-1;1"   # drone 2 goes home after 1 lane
-ros2 launch survey swarm_mission.launch.py start_delay:="0;26;0"          # drone 1 late -> separation yield
+ros2 launch survey swarm_mission.launch.py start_delay:="0;100;0"         # drone 1 late -> separation yield
 ```
 
 `num_drones`, `y_min` and `y_max` must be identical for `start_px4_swarm.sh`,

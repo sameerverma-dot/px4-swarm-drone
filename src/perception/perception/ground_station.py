@@ -35,7 +35,7 @@ class GroundStation(Node):
         self.declare_parameter('run_dir', '~/maps')
         self.declare_parameter('heartbeat_topic', '/swarm/heartbeat')
         self.declare_parameter('hazard_topic', '/swarm/hazards')
-        self.declare_parameter('min_sep_m', 4.5)
+        self.declare_parameter('min_sep_m', 1.5)
         self.declare_parameter('table_period_s', 5.0)
         self.declare_parameter('silent_after_s', 3.0)
         g = self.get_parameter
@@ -45,7 +45,8 @@ class GroundStation(Node):
         self.csv_path = os.path.join(self.run_dir, 'ground_hazards.csv')
         with open(self.csv_path, 'w', newline='') as f:
             csv.writer(f).writerow(['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf',
-                                    'alt_m', 'drone', 'hazard_id', 'status', 'logged_by'])
+                                    'alt_m', 'drone', 'hazard_id', 'status', 'logged_by',
+                                    'version', 'n_sightings', 'spread_m'])
 
         self.registry = HazardRegistry(me=255, min_sep_m=float(g('min_sep_m').value))
         self.hb = {}         # id -> (msg, rx_wall)
@@ -90,11 +91,14 @@ class GroundStation(Node):
 
     def on_hazard(self, m):
         h = Hazard(m.hazard_id, m.origin_drone, m.seq, m.stamp.sec + m.stamp.nanosec * 1e-9,
-                   m.north, m.east, m.alt, m.cls, m.conf)
+                   m.north, m.east, m.alt, m.cls, m.conf,
+                   version=m.version, n=m.n_sightings, spread=m.spread_m)
         outcome, sup = self.registry.add_peer(h)
         rows = []
         if outcome == 'new':
             rows = [(h, 'peer')]
+        elif outcome == 'update':
+            rows = [(self.registry.items[h.hazard_id], 'peer_update')]
         elif outcome == 'replaces':
             rows = [(sup, 'superseded'), (h, 'peer')]
         with open(self.csv_path, 'a', newline='') as f:
@@ -102,7 +106,7 @@ class GroundStation(Node):
             for x, status in rows:
                 w.writerow([f"{x.stamp:.1f}", f"{x.north:.2f}", f"{x.east:.2f}", x.cls,
                             f"{x.conf:.2f}", f"{x.alt:.1f}", str(x.origin), x.hazard_id,
-                            status, 'ground'])
+                            status, 'ground', str(x.version), str(x.n), f"{x.spread:.2f}"])
         if outcome in ('new', 'replaces', 'dup'):
             self.get_logger().info(
                 f"hazard {h.hazard_id} from drone {h.origin}: {h.cls} {h.conf:.2f} "

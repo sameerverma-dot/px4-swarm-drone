@@ -74,6 +74,13 @@ They fail independently. When something breaks, **first ask which highway**.
 | `perception/perception/detector_node.py` | **The eyes.** Subscribes to camera images, runs YOLO on the GPU, draws boxes, projects each detection from pixel → ground coordinates, de-duplicates, appends to the hazard CSV. |
 | `perception/launch/perception.launch.py` | Starts `ros_gz_bridge` (camera into ROS 2) + `detector_node`, both with `GZ_IP=127.0.0.1`. |
 | `perception/test_perception.py` | **Offline test.** Feeds the detector a known image + fake drone pose, so you can verify YOLO + geotagging without flying. |
+| `survey/survey/swarm_logic.py` | Swarm rules with no ROS in them (unit-tested): band split, lane layout, ETA, separation and right of way, takeover decisions. |
+| `survey/launch/onboard.launch.py` | Everything ONE drone's onboard computer runs: camera bridge, detector, survey node. |
+| `survey/launch/swarm_mission.launch.py` | N × `onboard.launch.py`, one run directory (`~/maps/swarm_<stamp>/`), optional ground station. |
+| `perception/perception/hazard_registry.py` | One drone's copy of the shared hazard list: per-frame association, refinement, peer merge rules (unit-tested). |
+| `perception/perception/ground_station.py` | Passive monitor: status table and the merged hazard list. Kill it and nothing changes. |
+| `perception/perception/hazard_map.py` | Renders a run (tracks, hazards, truth) to PNG + GeoJSON and scores it against known targets. |
+| `swarm_msgs/msg/*.msg` | `DroneHeartbeat` (4 Hz peer state) and `HazardReport` (shared hazards). |
 | `survey_node.py` (workspace root) | Standalone copy of the survey node, runnable without building. |
 
 Supporting files in each package — `package.xml` (dependencies), `setup.py`
@@ -98,12 +105,16 @@ px4_ros_ws/
 | `start_px4_sim.sh` | One command to boot everything: DDS agent + PX4/Gazebo + sourced ROS 2 shell + QGC, in a 3-pane tmux window. Also auto-sets the PX4 safety params. |
 | `tools/check_system.sh` | Six-layer PASS/FAIL probe of the whole stack. Run before every flight. |
 | `tools/add_target.sh` | Spawns the detection target into a running sim. Needed after **every** sim start. |
+| `tools/start_px4_swarm.sh` | The N-drone equivalent of `start_px4_sim.sh`. |
+| `tools/stop_sim.sh` | Stops everything (single or swarm); `--all` also closes QGC. |
+| `tools/add_swarm_targets.sh` | One target in the middle of each drone's band. |
+| `tools/analyse_sightings.py` | Calibration from a run's sightings: detection swath, timing, scatter (section 3.6). |
 | `tools/diagnose_camera.sh` | Read-only fact-gatherer for camera/render problems. |
 | `docs/CHEATSHEET.md` | Where things are, where each command runs, and the git flow. |
 | `docs/STACK_README.md` | How to run things. |
 | `docs/SYSTEM_GUIDE.md` | This file — how it all works. |
 | `docs/PROGRESS.md` | What's done / blocked / next. |
-| `docs/NEXT_SESSION.md` | Session log and the ordered plan. |
+| `docs/NEXT_SESSION.md` | Hand-off: current state and the ordered plan. |
 | `docs/PHASE1_ROADMAP.md` | Deliverables, milestones, grading split, team roles. |
 | `docs/CAMERA_DIAGNOSTIC.md` | Full write-up of the `GZ_IP` bug — worth reading as a debugging case study. |
 | `experiments/px_sweep.py` | Measures YOLO confidence vs target pixel size (the altitude ceiling). |
@@ -199,41 +210,66 @@ Whichever reports a rate is the real one.
 
 ### 3.6 Pixel → ground (how a detection becomes a map point)
 
-With a nadir camera and level flight:
+The camera is fixed to the airframe looking straight down (`CameraJoint`,
+fixed, in `x500_mono_cam_down`). Each box centre becomes a ray in the body
+frame, which is rotated by the drone's **full attitude** (PX4
+`vehicle_attitude`, roll + pitch + yaw) and intersected with flat ground at
+home altitude:
 
 ```
-metres_per_pixel = 2 · altitude · tan(HFOV/2) / image_width
-offset          = (pixel − image_centre) · metres_per_pixel
-world_position  = drone_position + rotate(offset, drone_heading)
+f        = (image_width / 2) / tan(HFOV / 2)            # pixels
+ray_body = ((v_centre − v) / f,  (u − u_centre) / f,  1)  # forward, right, down
+ray_ned  = rotate(q_attitude, ray_body)
+ground   = drone_position + (altitude / ray_ned.down) · (ray_ned.north, ray_ned.east)
 ```
 
-This is why the detector subscribes to `vehicle_local_position` as well as the
-camera — a detection is meaningless without knowing where the drone was.
+A detection is meaningless without knowing where the drone was **when the
+frame was taken**, so the detector keeps 2-3 s of pose and attitude and looks
+both up at *frame arrival − `pose_lag_s`*.
 
-**Calibrated (1 Sep).** A `person` model at Gazebo `x=15, y=10` → PX4
-`North=10, East=15`. The two high-confidence hits gave:
+**What the numbers rest on (2 Oct, `tools/analyse_sightings.py` over the
+`sightings_d<i>.csv` the detector writes):**
 
-| | recorded | truth | error |
-|---|---|---|---|
-| East (cross-track) | 14.53, 14.70 | 15.0 | **−0.47, −0.30 m** |
-| North (along-track) | 4.53, 8.65 | 10.0 | −5.5, −1.4 m |
+| | value | evidence |
+|---|---|---|
+| `pose_lag_s` | **0.25 s** | along-track error +0.01 m over 298 sightings, both travel directions; a timing error would show as the same-signed error ahead/behind on north- and south-bound lanes |
+| attitude vs level projection | level is **+0.5–0.8 m ahead** | the drone cruises 3° nose-down; attitude-aware removes it (use_attitude, default on) |
+| steady-flight scatter | **0.25 m RMS, 0.53 m max** | per-target spread of recorded sightings |
+| final error to truth | **0.09–0.29 m** | 11 targets, 3 drones |
+| merge radius `min_sep_m` | **1.5 m** | ~3x the worst scatter; separates a pair 2 m apart |
 
-Cross-track is accurate to under half a metre, so **the axis mapping is
-correct** — no `geo_swap_axes` / `geo_flip_*` flag is needed. The along-track
-error is **latency**, not geometry: the two hits are 0.2 s apart but place the
-target on *opposite* sides of the image centre, which can only happen if the
-frames were stale by different amounts. At the 9.2 m/s the drone was flying,
-0.3 s of staleness is 2.8 m of error.
+**Frames that are never recorded:**
 
-Two fixes, both now in the code:
+- **While turning** (`max_rate_dps`, 30°/s from the attitude 0.1 s either side
+  of the frame). Turning onto a lane the drone banks 20+° and yaws ~140°/s;
+  those frames put a person standing *under* the lane 5 m off.
+- **Off the survey area.** The detection gate is open only along a lane *and*
+  over `[x_min, x_max]`. Each lane has a 6 m lead-in/run-out outside the area
+  (`lead_in_m`) so the drone is straight and level when the area starts, and
+  heading for a lane start it already faces along the lane (it sidesteps
+  rather than swinging up to 180°). Geotags in the first 6 m of a lane were
+  p90 1.47 m against ≤ 0.5 m after.
 
-1. `detector_node` keeps a ring buffer of poses and geotags with the pose at
-   *frame arrival* minus `pose_lag_s` (default 0.15), not the newest pose.
-2. `survey_node` has `lookahead_m` (default 4.0) which caps ground speed at
-   ~3.8 m/s instead of letting PX4 sprint at `MPC_XY_VEL_MAX`.
+**Turning sightings into hazards** (`perception/hazard_registry.py`):
 
-Residual along-track error should now be around ±1.5 m — comparable to the
-2 m dedup radius, and small against the 12 × 9 m camera footprint.
+1. Within one frame, two boxes closer than `box_merge_m` (1.0 m) on the ground
+   are one object boxed twice (YOLO does this - whole body + part).
+2. Each remaining detection is matched to the nearest known hazard within
+   `min_sep_m`, **one-to-one per frame** - so two objects seen together are
+   never merged, however close.
+3. The owner refines the hazard's position as a weighted mean of its
+   sightings, weight = confidence × cos²(off-nadir angle): oblique views are
+   less accurate, and are where two close objects get boxed as one.
+
+History: the 1 Sep calibration (East −0.47/−0.30 m, North −5.5/−1.4 m) is
+what found the latency in the first place - a consistent error on one axis and
+a sign-flipping one on the other is timing, not frames (`PROGRESS.md` §6).
+
+**Lane spacing comes from the detector, not the camera.** The camera sees a
+23.7 m wide strip at 10 m; YOLO scores a COCO `person` ≥ 0.65 reliably only
+within ~2.5 m of the track (74 passes: 0–1.5 m 10/11, 1.5–3 m 7/11, 3–4.5 m
+3/12). `survey_node` spaces lanes by `detect_fov_deg` (28°) × (1 − `sidelap`):
+4 m. Re-measure with `tools/analyse_sightings.py` for any other weights.
 
 ---
 
@@ -249,9 +285,10 @@ ros2 topic list | grep vehicle_local_position
 # 3. build + fly the whole mission
 cd ~/px4_ros_ws
 colcon build --packages-select survey perception && source install/setup.bash
-ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=5.0
-#    defaults now: classes:='person' conf:=0.40 require_gate:=true lookahead_m:=4.0
+ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0
+#    defaults now: classes:='person' conf:=0.65 require_gate:=true lookahead_m:=4.0
 #    classes:='' to see every COCO class again (expect airplane/kite/bird junk)
+#    The 3-drone swarm: docs/CHEATSHEET.md section 5b.
 
 # 4. watch
 ros2 run rqt_image_view rqt_image_view /detection/image_annotated
@@ -282,15 +319,13 @@ python3 ~/px4_ros_ws/src/perception/test_perception.py                     # ter
 
 ## 6. Where this is going
 
-Done: single-drone autonomous area survey (two ways) · camera → ROS 2 ·
-YOLO on GPU · geotagging **calibrated against a known target** · full mission
-verified end-to-end (`VERIFY PASS | waypoints 11/11 | returned=True`).
+Done and flight-verified: single-drone survey; the decentralised 3-drone swarm
+(onboard autonomy, heartbeats, band takeover, shared hazard list, separation);
+geotagging calibrated to ~0.2 m against 11 known targets; the hazard map.
 
-Next, in order:
-1. **Train landmine weights** on **aerial/nadir imagery** (COCO weights can't see
-   a person from straight above — that's a data problem, not a code problem).
-3. **Render the hazard map** as a real deliverable.
-4. **Swarm** — multiple PX4 instances under namespaces (`/px4_1`, `/px4_2`),
-   splitting one area between drones.
-4. **Hardware track** — CAD, Make-fabricated parts, DFM + FEA/CFD report.
-   Half the grade; runs in parallel with all of the above.
+Next, in order (`NEXT_SESSION.md` has the detail):
+1. **Landmine weights** trained on nadir imagery - then re-measure the
+   detection swath, because lane spacing (and so flight time) follows it.
+2. **Terrain following** - the projection assumes flat ground at home altitude.
+3. **Hardware track** - CAD, fabricated parts, DFM + FEA/CFD report. Half the
+   grade; runs in parallel with all of the above.

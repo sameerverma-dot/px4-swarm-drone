@@ -1,11 +1,11 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 2 Oct 2026 (**decentralised 3-drone swarm, flight-verified**: each
-drone flies, detects and logs on its own; peers exchange heartbeats and hazard
-reports directly; an early-returning or silent drone's lanes are taken over by
-its neighbour; band-boundary detections are de-duplicated drone-to-drone; peers
-keep separation (closest approach 5.19 m in a forced conflict). Section 11.)_
+_Last updated: 2 Oct 2026, evening (**review fixes + calibration**: all six
+weak spots from the section 11 review fixed and flown; geolocation calibrated
+from data - 11 of 11 targets, 0.09-0.29 m, no duplicates, a pair 2 m apart kept
+apart; lane spacing now set by the detector's measured swath. Section 12.
+Section 11: the decentralised 3-drone swarm itself.)_
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -25,8 +25,9 @@ requirement. The single-drone loop below remains the accuracy baseline
 everything is measured against.
 
 Remaining on the software side: landmine weights in place of the COCO stand-in
-(it is now the weakest link, ~88 % per pass), and a compute budget for real
-onboard detection (section 11.5). **Hardware (Track B) is 50 % of
+(the weakest link: it scores a person reliably only within ~2.5 m of the track,
+which is what now sets the lane spacing - section 12.2), terrain following, and
+a compute budget for real onboard detection (section 11.5). **Hardware (Track B) is 50 % of
 the grade and is still at zero** — it is now the project's largest risk.
 
 **Verified on 5 Sep**, one command, unattended:
@@ -82,7 +83,9 @@ there is still only one drone.
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
 | Camera capture 1280x960 + imgsz to match | ✅ Built & live-verified (section 8.1) |
 | **Multi-drone swarm (2–5)** | ✅ **3 drones, decentralised, 2 Oct — onboard autonomy, band takeover (early return + silent drone), shared hazard list, peer separation, all flight-verified (section 11)** |
-| Geotag accuracy vs known target | ✅ 0.75 m |
+| Geotag accuracy vs known target | ✅ **0.09–0.29 m, 11 targets, 3 drones** (12.3); was 0.75 m single-drone |
+| Close targets kept separate | ✅ a pair 2 m apart → two hazards, 5 flights of 5 (12.3) |
+| Detector calibration from flight data (`tools/analyse_sightings.py`) | ✅ swath, timing, scatter (12.2) |
 | False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
 | Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
 | Target spawner (`tools/add_target.sh`) | ✅ GUI-inserted models die on restart |
@@ -830,3 +833,112 @@ the swarm. Boundary target: 4 of 4, always exactly once.
   wins" to mean earlier (lists still converge without it).
 - The band boundary is still flown twice (drone i's last lane, drone i+1's first).
 - Hardware (Track B) still at zero.
+
+---
+
+## 12. Review fixes and calibration — 2 Oct (evening)
+
+A review of section 11 listed six weak spots plus stale docs. All six are
+fixed and flown, and the geolocation is now calibrated from flight data rather
+than from one target per band. **This section supersedes 11.2's separation and
+hazard-merge rules**, and closes 11.5's "boundary flown twice".
+
+### 12.1 The review → what changed
+
+| # | finding | fix | evidence |
+|---|---|---|---|
+| 1 | `min_sep_m` 4.5 merged real mines 1–3 m apart | detections matched to hazards **one-to-one per frame**; two boxes < 1.0 m apart in one frame = one object boxed twice; `min_sep_m` **1.5** | pair 2 m apart → two hazards in all 5 flights since cal5; steady scatter 0.25 m RMS, 0.53 m max |
+| 2 | dedup kept the earliest fix, not the best | the owner refines each hazard (weighted mean, weight = conf × cos² off-nadir) and rebroadcasts it with a version; peers adopt the newest | final errors 0.09–0.29 m |
+| 3 | a yield could last long (a HOLD peer blocked up to 120 s) | right of way **working > HOLD > YIELD**; a yield **moves away horizontally at its own altitude**; passes over/under only a peer holding its altitude for 20 s | yield over in 5 s; closest approach 5.75 m |
+| 4 | detection gate open in the lane turns | gate open only along a lane **and over the area**; 6 m lead-in/run-out; frames dropped above 30°/s rotation; heading for a lane start the drone already faces along it | final flight: 0 frames dropped for turning |
+| 5 | band boundary flown twice | strip-centred lanes, n = ceil(W/S) at (k+½)·W/n | no lane on a boundary |
+| 6 | a failsafe must never land in the field | `COM_LOW_BAT_ACT 3` (return, default was warn only) on every instance; `survey_node` logs an error if PX4 starts landing away from home | param + alert; low battery not exercised in flight |
+
+### 12.2 Calibration — measured, not assumed
+
+The detector now writes `sightings_d<i>.csv`: every person box in every gated
+frame, **including below-threshold boxes and frames dropped while turning**,
+with the pose, velocity and attitude used and the box projected both ways
+(attitude-aware and level). `tools/analyse_sightings.py` turns a run plus its
+`targets.csv` into the three numbers below.
+
+**Lane spacing = the detection swath, not the camera footprint.** The camera
+sees 23.7 m across at 10 m; footprint-derived lanes were 16.6 m apart, and the
+first flight of this round found **2 of 6** targets - everything 7.5 m off a
+lane scored 0.41–0.64 against 0.65. Pooled over three flights, best confidence
+per lane pass (steady flight):
+
+| distance from track | passes | recorded (≥ 0.65) |
+|---|---|---|
+| 0–1.5 m | 11 | 10 |
+| 1.5–3 m | 11 | 7 |
+| 3–4.5 m | 12 | 3 |
+| 4.5–12 m | 40 | 10 (lucky oblique views) |
+
+`detect_fov_deg` 28° (±2.5 m at 10 m) with 20 % sidelap → **4 m lanes, 8 per
+30 m band** (was 2). Every point is ≤ 2 m from one lane and ~2 m from the next.
+This is the COCO `person` stand-in's swath; landmine weights will have their
+own - re-measure, it sets the flight time.
+
+**Timing.** `pose_lag_s` 0.25 confirmed: along-track error **+0.01 m** over 298
+steady sightings, both directions. Level-flight projection put everything
+0.5–0.8 m ahead - the 3° nose-down cruise attitude - which the attitude-aware
+projection removes. Arrival delay after PX4's own timestamp: pose and attitude
+≤ 18 ms, image jitter ≤ 27 ms (now in the detector's stats line).
+
+**Where the error was.** Error to truth against distance into the lane: p90
+**1.47 m in the first 6 m**, ≤ 0.5 m after, ~1 m again while braking. Hence the
+area-only gate and the lead-in.
+
+### 12.3 Flights (one sim session; 11 targets)
+
+Targets: a lateral-offset sweep in band 0 (0–9 m off the old lanes), a pair 2 m
+apart and the band 0/1 boundary target in band 1, three in band 2.
+
+| flight | under test | lanes/band | found | dup. | what it showed |
+|---|---|---|---|---|---|
+| cal1 | before (footprint lanes) | 2 | 2/6 | 0 | targets 7.5 m off-lane never recorded |
+| cal2 | sightings log | 2 | 6/11 (+2 placed ~5 m off) | 1 | turn-onto-lane frames 5 m off; one person boxed twice → 2 hazards |
+| cal3 | swath 53°, turn filter, box merge | 4 | 8/11 | 0 | 2–4 m off-track unreliable; pair merged at `min_sep` 2.5 |
+| cal4 | 5 m lead-in, `min_sep` 1.5 | 4 | 7/11 | 0 | pooled swath table above |
+| cal5 | swath 28° | 8 | **11/11** | 0 | 0.01–0.59 m |
+| sep1 | drone 1 starts 100 s late | 8 | 11/11 | 1 | duplicate from lane-start error; yield log flapping |
+| sep2 | area-only gate, yield margin | 8 | 11/11 | 0 | yield climbed into the peer's RTL climb: **3.31 m at the same height** |
+| sep3 | horizontal yield | 8 | 11/11 | 0 | yield 5 s, **closest 5.75 m** |
+| single | `mission.launch.py`, 2 targets | 6 | 2/2 | 0 | first-lane swing dropped a 0.85 hit → face along the lane |
+| **final** | everything | 8 | **11/11** | **0** | **0.09–0.29 m**, 0 turning drops, boundary target logged once |
+
+### 12.4 Bugs found by flying it
+
+- **YOLO boxes one person twice** (whole + part), 0.2–0.7 m apart on the
+  ground: one person became two hazards. → `box_merge_m`.
+- **Turning onto a lane wrecks geotags**: banked 24°, yawing 140°/s; a person
+  directly under the lane placed 5 m off. Not a timing error (measured above) -
+  the error persisted for ~6 m after the turn. → turn-rate filter, area-only
+  gate, lead-in, face along the lane before reaching it.
+- **A close pair merged** although seen in separate frames: far ahead, YOLO
+  boxed both people as one, fixing a hazard at their midpoint; a later view of
+  one of them fell inside 2.5 m of it. → `min_sep_m` 1.5, near-nadir views
+  weighted up. A merged mine is a live mine missing from the map; a duplicate
+  is a second flag next to a real one - so the radius errs to duplicates.
+- **Yield flapping**: parked exactly `sep_vertical_m` from the peer, its
+  altitude wobble toggled hold/pass 5 times in 0.5 s. → 1 m margin + hysteresis.
+- **Yield climbed into an RTL climb**: drone 1 yielded upward; drone 0 then
+  finished and climbed to its RTL altitude through the same spot - 3.31 m apart
+  at one height. → yields keep their altitude and move away (off a moving
+  peer's line, not backwards along it); peer climb rate and ground velocity
+  are now estimated from heartbeats.
+- Test hygiene: a `timeout`-wrapped launch keeps its detectors alive after
+  VERIFY; a second launch then shares `/swarm/hazards` and both write the same
+  files. Stop the previous launch (or `tools/stop_sim.sh`) first.
+
+### 12.5 Still open
+
+- **Flight time doubled** (8 lanes per band instead of 4) because the stand-in
+  detector's swath is ±2.5 m. Landmine weights decide this number.
+- Terrain following not started: the projection assumes flat ground at home
+  altitude.
+- Low-battery return (#6) is set and alerted, not flown (needs a simulated drain).
+- A horizontal yield ignores other peers' positions and the area boundary.
+- The rest of 11.5 stands: onboard compute budget, a silent-but-flying drone
+  past its ETA, takeover of a takeover, wall-clock hazard stamps, hardware.

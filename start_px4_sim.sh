@@ -150,7 +150,8 @@ if command -v tmux >/dev/null 2>&1; then
             sleep 1
         done
         sleep 2
-        for p in "COM_RC_IN_MODE 4" "COM_RCL_EXCEPT 7" "NAV_RCL_ACT 0" "NAV_DLL_ACT 0" "CBRK_SUPPLY_CHK 894281"; do
+        # COM_LOW_BAT_ACT 3: return at critical battery (default 0 = warning only).
+        for p in "COM_RC_IN_MODE 4" "COM_RCL_EXCEPT 7" "NAV_RCL_ACT 0" "NAV_DLL_ACT 0" "CBRK_SUPPLY_CHK 894281" "COM_LOW_BAT_ACT 3"; do
             tmux send-keys -t "$px4_pane" "param set $p" Enter
             sleep 0.4
         done

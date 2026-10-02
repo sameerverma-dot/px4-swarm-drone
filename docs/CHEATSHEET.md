@@ -223,19 +223,33 @@ ros2 run rqt_image_view rqt_image_view /detection/image_annotated_1
 
 Everything from one run lands in `~/maps/swarm_<stamp>/`: `run.json` (band
 math, so `hazard_map` needs no arguments), `survey_track_d<i>_*.csv`,
-`hazards_d<i>.csv` (each drone's onboard log - own AND peer hazards), and
-`ground_hazards.csv`.
+`hazards_d<i>.csv` (each drone's onboard log - own AND peer hazards),
+`sightings_d<i>.csv` (every person box, recorded or not, with the pose it was
+geotagged with) and `ground_hazards.csv`.
+
+**Calibrating** (after a new model, altitude or camera): put the targets'
+true positions in the run dir as `targets.csv` (`name,north,east`), then
+
+```bash
+python3 tools/analyse_sightings.py          # newest run
+```
+
+prints (1) confidence against distance from the lane - set `detect_fov_deg`
+from where it stops being reliable, (2) along-track error by direction - a
+`pose_lag_s` correction, (3) per-target scatter - a floor for `min_sep_m`.
+SYSTEM_GUIDE §3.6 has the current numbers.
 
 **Fault injection** - ';'-separated, one value per drone:
 
 ```bash
 ros2 launch survey swarm_mission.launch.py abort_after_lanes:="-1;-1;1"  # drone 2 home after 1 lane
-ros2 launch survey swarm_mission.launch.py start_delay:="0;26;0"         # drone 1 late -> separation
+ros2 launch survey swarm_mission.launch.py start_delay:="0;100;0"        # drone 1 climbs as drone 0's last lane passes -> separation
 # A dead onboard computer: kill drone 2's survey_node_2, detector_node_2 and
 # camera_bridge_2 (PIDs are in the launch log) mid-flight.
 ```
 
-**What it looks like when it works** (2 Oct flights):
+**What it looks like when it works** (2 Oct flights; the takeover logs are
+from when bands had 3 lanes - they have 8 now):
 
 ```
 # takeover after an early return - the NEIGHBOUR takes it, not the first one done
@@ -252,9 +266,9 @@ ros2 launch survey swarm_mission.launch.py start_delay:="0;26;0"         # drone
 # shared hazard list at a band boundary
 [detector_node_0]: saw person 0.66 at N=22.5 E=29.8 - already logged by drone 1 as d1-1 (0.1 m away), not logged again
 
-# separation
-[survey_node_1]: SEPARATION: peer 0 at 6.4 m horizontal / 5.0 m vertical -> yielding: hold position, go to 5.0 m
-[survey_node_1]: SEPARATION: peer 0 clear -> resuming
+# separation - the yielding drone keeps its altitude and moves away
+[survey_node_1]: SEPARATION: peer 0 at 7.9 m horizontal / 0.5 m vertical -> yielding: moving away at my altitude
+[survey_node_1]: SEPARATION: peer 0 clear after 5 s -> back to survey altitude
 ```
 
 Every 5 s per drone the detector prints a health line - `camera ~8 fps,
@@ -301,12 +315,14 @@ per drone (`Y_MAX = 30 x N`): much narrower than one lane spacing (~16.6 m at
 
 | Argument | Default | Notes |
 |---|---|---|
-| `num_drones` | `2` | **Must match Terminal 1.** |
+| `num_drones` | `3` | **Must match Terminal 1.** |
 | `x_min` / `x_max` | `0.0` / `30.0` | North extent — the lane length. |
-| `y_min` / `y_max` | `0.0` / `60.0` | East extent, split into bands. **Must match.** |
+| `y_min` / `y_max` | `0.0` / `90.0` | East extent, split into bands. **Must match.** |
 | `altitude` | `10.0` | **The governing parameter.** Above ~11.2 m at 1280 px the target falls under the 24 px detection floor and you find nothing. |
-| `lane_spacing` | `0.0` | `0.0` derives it from the camera footprint. Only override to force gaps or overlap. |
-| `sidelap` | `0.3` | Fraction of overlap between lanes. Higher = safer coverage, longer flight. |
+| `lane_spacing` | `0.0` | `0.0` derives it from the **detection swath**: `2·h·tan(detect_fov_deg/2)·(1−sidelap)` = 4 m at 10 m. Only override to force gaps or overlap. |
+| `detect_fov_deg` | `28.0` | Cross-track angle in which the detector reliably scores a target - **measured** for the COCO person (±2.5 m at 10 m). Re-measure for new weights; it sets the flight time. |
+| `sidelap` | `0.2` | Fraction of overlap between swaths. Higher = safer coverage, longer flight. |
+| `lead_in_m` | `6.0` | Lanes start/end this far outside the area so the drone is straight and level over it; detection runs only over the area. |
 | `lookahead_m` | `4.0` | Ground-speed cap ≈ `0.95 × this`. Geotag error scales with speed — 3.8 m/s gives ~1 m, 9.2 m/s gave ~4 m. `0.0` = flat out. |
 | `yaw_mode` | `course` | `course` faces direction of travel; `fixed` locks to `fixed_yaw_deg`; `hold` doesn't command yaw. |
 | `fixed_yaw_deg` | `0.0` | Degrees from North. Only read when `yaw_mode:=fixed`. |
@@ -322,7 +338,9 @@ per drone (`Y_MAX = 30 x N`): much narrower than one lane spacing (~16.6 m at
 | `classes` | `person` | Pushed into YOLO, not filtered afterwards. |
 | `conf` | `0.65` | Pooled over four flights, false positives never exceeded 0.57 and real hits never fell below 0.77. Don't lower it without re-measuring. |
 | `imgsz` | `1280` | **Must match the camera's capture width** or ultralytics downscales the detail straight back out. |
-| `pose_lag_s` | `0.25` | Frame-to-pose time matching. This is what took geotag error from 5.5 m to 0.75 m. |
+| `pose_lag_s` | `0.25` | Frame-to-pose time matching. This is what took geotag error from 5.5 m to 0.75 m; re-confirmed 2 Oct (+0.01 m along-track). |
+| `use_attitude` | `true` | Project through the drone's full attitude, not a level-flight assumption (level puts everything 0.5–0.8 m ahead). |
+| `min_sep_m` | `1.5` | Two detections closer than this (in different frames) are one object. Small on purpose: a duplicate is better than a merged mine. |
 | `max_alt_m` | `40.0` | Ignore detections above this — stops RTL climb-out logging phantom hazards. |
 | `require_gate` | `true` | Only geotag during actual survey lanes, not climb or RTL. |
 
