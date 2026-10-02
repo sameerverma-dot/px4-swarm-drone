@@ -29,8 +29,8 @@
 # shell script and a ROS launch file.
 #
 # Usage (flags and environment variables are equivalent; flags win):
-#   bash tools/start_px4_swarm.sh                        # 2 drones, defaults
-#   bash tools/start_px4_swarm.sh --num-drones 2 --y-min 0 --y-max 60 gz_x500_mono_cam_down
+#   bash tools/start_px4_swarm.sh                        # 3 drones over y=[0,90]
+#   bash tools/start_px4_swarm.sh --num-drones 3 --y-min 0 --y-max 90 gz_x500_mono_cam_down
 #   NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/start_px4_swarm.sh gz_x500_mono_cam_down
 #
 # Stop everything: bash tools/stop_sim.sh
@@ -42,9 +42,9 @@ PX4_DIR="$HOME/PX4-Autopilot"
 AGENT_DIR="$HOME/Micro-XRCE-DDS-Agent"
 ROS_WS="$HOME/px4_ros_ws"
 
-NUM_DRONES="${NUM_DRONES:-2}"
+NUM_DRONES="${NUM_DRONES:-3}"
 Y_MIN="${Y_MIN:-0.0}"
-Y_MAX="${Y_MAX:-60.0}"
+Y_MAX="${Y_MAX:-90.0}"
 MODEL="${PX4_MODEL:-gz_x500_mono_cam_down}"
 # Parse flags. Anything starting with '-' that isn't known is an error: before
 # this, `--num-drones 2` was taken as the Gazebo MODEL and PX4's build died on
@@ -302,8 +302,12 @@ tmux select-layout -t "$SESSION:sim" tiled
                 sleep 1
             done
             sleep 2
+            # COM_OBL_RC_ACT 3: if the onboard computer stops sending offboard
+            # setpoints (its Pi died), RETURN. The default (0, Position mode)
+            # with no RC stick means hover in place forever - inside the band a
+            # neighbour will later fly into to take over.
             for p in "COM_RC_IN_MODE 4" "COM_RCL_EXCEPT 7" "NAV_RCL_ACT 0" "NAV_DLL_ACT 0" \
-                     "CBRK_SUPPLY_CHK 894281" "RTL_RETURN_ALT $rtl_alt"; do
+                     "CBRK_SUPPLY_CHK 894281" "RTL_RETURN_ALT $rtl_alt" "COM_OBL_RC_ACT 3"; do
                 tmux send-keys -t "$pane" "param set $p" Enter
                 sleep 0.4
             done

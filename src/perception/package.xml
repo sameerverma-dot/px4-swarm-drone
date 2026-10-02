@@ -11,6 +11,7 @@
   <exec_depend>sensor_msgs</exec_depend>
   <exec_depend>std_msgs</exec_depend>
   <exec_depend>px4_msgs</exec_depend>
+  <exec_depend>swarm_msgs</exec_depend>
   <exec_depend>ros_gz_bridge</exec_depend>
 
   <export>

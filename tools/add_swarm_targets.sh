@@ -42,9 +42,9 @@
 
 set -uo pipefail
 
-NUM_DRONES="${NUM_DRONES:-2}"
+NUM_DRONES="${NUM_DRONES:-3}"
 Y_MIN="${Y_MIN:-0.0}"
-Y_MAX="${Y_MAX:-60.0}"
+Y_MAX="${Y_MAX:-90.0}"
 X_MIN="${X_MIN:-0.0}"
 X_MAX="${X_MAX:-30.0}"
 # Where along the lane (north) to put every target. Default: middle of the

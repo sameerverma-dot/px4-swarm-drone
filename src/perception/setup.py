@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'detector_node = perception.detector_node:main',
             'hazard_map = perception.hazard_map:main',
+            'ground_station = perception.ground_station:main',
         ],
     },
 )
