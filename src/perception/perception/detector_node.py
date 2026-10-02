@@ -49,7 +49,7 @@ MULTI-DRONE (SWARM): ONE detector, N cameras, ONE hazard list
 SWARM_PLAN.md's numbers say a single shared detector has 5x headroom across
 3 drones, so this node was built to serve N drones rather than spawn N
 detector processes: one model load, no extra GPU contention, and correct
-deduplication for free (one `self.hazards` list, not one per drone racing
+deduplication for free (one hazard registry, not one per drone racing
 to append to the same CSV).
 
 Multi-drone mode is opt-in via the PLURAL parameters (image_topics,
@@ -92,6 +92,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool
 from px4_msgs.msg import VehicleLocalPosition
+from swarm_msgs.msg import HazardReport
+
+from perception.hazard_registry import Hazard, HazardRegistry
 
 try:
     import cv2
@@ -159,6 +162,12 @@ class DetectorNode(Node):
         # only detections >= conf are drawn or recorded.
         self.declare_parameter('diag_conf', 0.25)
         self.declare_parameter('stats_period_s', 5.0)
+        # --- onboard swarm (one detector per drone) ---
+        # drone_id >= 0 = this detector runs ON drone `drone_id` and labels its
+        # hazards d<id>-<n>. swarm_hazard_topic set = share the hazard list with
+        # peers over that topic (see hazard_registry.py). Both off by default.
+        self.declare_parameter('drone_id', -1)
+        self.declare_parameter('swarm_hazard_topic', '')
 
         gp = self.get_parameter
         self.image_topic = str(gp('image_topic').value)
@@ -169,6 +178,8 @@ class DetectorNode(Node):
         self.publish_annotated = bool(gp('publish_annotated').value)
         self.hazard_csv = os.path.expanduser(str(gp('hazard_csv').value))
         self.min_sep = float(gp('min_sep_m').value)
+        self.drone_id = int(gp('drone_id').value)
+        self.swarm_hazard_topic = str(gp('swarm_hazard_topic').value).strip()
         self.imgsz = int(gp('imgsz').value)
         self.half_req = bool(gp('half').value)
         self.pose_lag = float(gp('pose_lag_s').value)
@@ -216,6 +227,19 @@ class DetectorNode(Node):
                 self.half = False
         self.get_logger().info(
             f"inference device={self.device} imgsz={self.imgsz} fp16={self.half}")
+
+        # Warm up NOW, on the pad. The first inference pays for CUDA kernel
+        # setup at this imgsz; done lazily it landed on the first gated frame,
+        # and with three detectors warming up on one GPU at once the first
+        # 5-20 s of every drone's first lane went uninspected ("inferred 0.0
+        # fps" while frames arrived - measured 2 Oct).
+        t_w = time.time()
+        try:
+            self.model(np.zeros((960, 1280, 3), np.uint8), imgsz=self.imgsz,
+                       device=self.device, verbose=False)
+            self.get_logger().info(f"model warm-up {time.time() - t_w:.1f} s")
+        except Exception as e:  # noqa: BLE001
+            self.get_logger().warn(f"model warm-up failed (first frame will be slow): {e}")
 
         # Resolve the class-name filter to model class IDs so the filtering happens
         # INSIDE YOLO: unwanted classes are never drawn and never scored.
@@ -285,7 +309,10 @@ class DetectorNode(Node):
                     f"  drone {i}: image='{d['image_topic']}' pose_ns='{d['pose_ns']}' "
                     f"gate='{d['gate_topic']}' offset=({d['offset_n']:.1f},{d['offset_e']:.1f})")
 
-        self.hazards = []   # list of (north, east) already recorded - shared across all drones
+        self.me = self.drone_id if self.drone_id >= 0 else 0
+        self.registry = HazardRegistry(self.me, self.min_sep)
+        self._suppressed = set()               # peer hazard ids we've reported re-seeing
+        self.hazard_lock = threading.Lock()   # infer worker vs peer-report callback
 
         px4_qos = QoSProfile(
             reliability=ReliabilityPolicy.BEST_EFFORT,
@@ -350,15 +377,27 @@ class DetectorNode(Node):
             if self.publish_annotated:
                 d['pub_annot'] = self.create_publisher(Image, d['annotated_topic'], 1)
 
-        os.makedirs(os.path.dirname(self.hazard_csv), exist_ok=True)
-        if not os.path.exists(self.hazard_csv):
-            with open(self.hazard_csv, 'w', newline='') as f:
-                csv.writer(f).writerow(
-                    ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m', 'drone'])
+        self._open_csv()
+
+        # Shared hazard list. Onboard, each drone's detector broadcasts what it
+        # finds and folds in what its peers find. RELIABLE + TRANSIENT_LOCAL so a
+        # late joiner (a rebooted drone, the optional ground station) receives
+        # the history, not just what is broadcast after it starts.
+        self.pub_hazard = None
+        if self.swarm_hazard_topic:
+            hz_qos = QoSProfile(reliability=ReliabilityPolicy.RELIABLE,
+                                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                                history=HistoryPolicy.KEEP_LAST, depth=200)
+            self.pub_hazard = self.create_publisher(HazardReport, self.swarm_hazard_topic, hz_qos)
+            self.create_subscription(HazardReport, self.swarm_hazard_topic,
+                                     self.on_peer_hazard, hz_qos,
+                                     callback_group=self.cb_state)
+            self.get_logger().info(
+                f"shared hazard list on '{self.swarm_hazard_topic}' as drone {self.me}")
 
         for i, d in enumerate(self.drones):
             self.get_logger().info(
-                f"detector up: drone {i} image='{d['image_topic']}' -> "
+                f"detector up: drone {self._label(i)} image='{d['image_topic']}' -> "
                 f"annotated='{d['annotated_topic']}', hazards -> {self.hazard_csv}")
         self.get_logger().info(
             f"require_gate={self.require_gate} | pose_lag={self.pose_lag}s | "
@@ -392,7 +431,7 @@ class DetectorNode(Node):
             return
         for i, d in enumerate(self.drones):
             st = d['st']
-            msg = (f"drone {i} [{'OPEN' if d['gate'] else 'closed'}] "
+            msg = (f"drone {self._label(i)} [{'OPEN' if d['gate'] else 'closed'}] "
                    f"camera {st['rx'] / dt:.1f} fps, inferred {st['inferred'] / dt:.1f} fps, "
                    f"pose {st['pose'] / dt:.0f} Hz, "
                    f"best {self.keep_label} {st['best']:.2f} "
@@ -448,6 +487,11 @@ class DetectorNode(Node):
             f"-> padding/truncating with {default!r}")
         return (items + [default] * expect)[:expect]
 
+    def _label(self, idx):
+        """Drone number for log lines: the onboard drone id if this detector
+        runs on a drone, else the camera's index in a shared detector."""
+        return self.drone_id if self.drone_id >= 0 else idx
+
     @staticmethod
     def _per_drone_topic(base, i, n):
         return base if n <= 1 else f"{base}_{i}"
@@ -466,7 +510,7 @@ class DetectorNode(Node):
         d = self.drones[drone_idx]
         new = bool(msg.data)
         if new != d['gate'] or not d['gate_seen']:
-            self.get_logger().info(f"drone {drone_idx} detection gate -> {'OPEN' if new else 'closed'}")
+            self.get_logger().info(f"drone {self._label(drone_idx)} detection gate -> {'OPEN' if new else 'closed'}")
         d['gate'] = new
         d['gate_seen'] = True
 
@@ -547,23 +591,90 @@ class DetectorNode(Node):
         east = y + fwd * math.sin(yaw) + right * math.cos(yaw)
         return north, east
 
-    def record_hazard(self, north, east, cls, conf, alt, drone_idx=0):
-        # Shared across every drone: this ONE list (and CSV) is what makes
-        # dedup correct for a swarm instead of something to bolt on - N
-        # detector processes each appending to the same file would never
-        # dedup against each other. See module docstring.
-        for (hn, he) in self.hazards:
-            if math.hypot(north - hn, east - he) < self.min_sep:
-                return False            # already have one here
-        self.hazards.append((north, east))
+    CSV_HEADER = ['t_s', 'x_ned_north', 'y_ned_east', 'class', 'conf', 'alt_m',
+                  'drone', 'hazard_id', 'status', 'logged_by']
+
+    def _open_csv(self):
+        """Append-only log. A file left by an older version (7 columns) is set
+        aside rather than appended to with a different column count."""
+        os.makedirs(os.path.dirname(self.hazard_csv), exist_ok=True)
+        if os.path.exists(self.hazard_csv):
+            with open(self.hazard_csv, newline='') as f:
+                header = next(csv.reader(f), [])
+            if header == self.CSV_HEADER:
+                return
+            old = f"{self.hazard_csv[:-4]}_oldformat_{int(time.time())}.csv"
+            os.rename(self.hazard_csv, old)
+            self.get_logger().warn(f"older-format hazard CSV moved aside -> {old}")
+        with open(self.hazard_csv, 'w', newline='') as f:
+            csv.writer(f).writerow(self.CSV_HEADER)
+
+    def _log_row(self, h, status):
         with open(self.hazard_csv, 'a', newline='') as f:
             csv.writer(f).writerow(
-                [f"{time.time():.1f}", f"{north:.2f}", f"{east:.2f}",
-                 cls, f"{conf:.2f}", f"{alt:.1f}", str(drone_idx)])
+                [f"{h.stamp:.1f}", f"{h.north:.2f}", f"{h.east:.2f}", h.cls,
+                 f"{h.conf:.2f}", f"{h.alt:.1f}", str(h.origin), h.hazard_id,
+                 status, str(self.me)])
+
+    def record_hazard(self, north, east, cls, conf, alt, drone_idx=0):
+        """One registry per detector process. Onboard (one camera, swarm topic
+        set) it also holds every hazard the peers have broadcast, so an object
+        a neighbour already logged is not logged again - the band-boundary
+        case - without any ground station. See hazard_registry.py."""
+        origin = self.me if self.drone_id >= 0 else drone_idx
+        with self.hazard_lock:
+            h = self.registry.add_own(north, east, alt, cls, conf, time.time(), origin=origin)
+            if h is None:
+                # Already have one here. If a PEER logged it, say so once - that
+                # is the shared hazard list doing its job (band boundaries).
+                near = self.registry.nearest(north, east)
+                if near and near[0].origin != origin and near[0].hazard_id not in self._suppressed:
+                    self._suppressed.add(near[0].hazard_id)
+                    self.get_logger().info(
+                        f"saw {cls} {conf:.2f} at N={north:.1f} E={east:.1f} - already "
+                        f"logged by drone {near[0].origin} as {near[0].hazard_id} "
+                        f"({near[1]:.1f} m away), not logged again")
+                return False
+            self._log_row(h, 'own')
+            n_known = len(self.registry.items)
+        if self.pub_hazard is not None:
+            self.pub_hazard.publish(self._to_report(h))
         self.get_logger().info(
-            f"HAZARD #{len(self.hazards)}: {cls} conf={conf:.2f} at "
-            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m, drone {drone_idx})")
+            f"HAZARD {h.hazard_id}: {cls} conf={conf:.2f} at "
+            f"N={north:.1f} E={east:.1f} (alt {alt:.1f}m, drone {origin}) "
+            f"- swarm list now {n_known}")
         return True
+
+    def _to_report(self, h):
+        m = HazardReport()
+        m.hazard_id, m.origin_drone, m.seq = h.hazard_id, h.origin, h.seq
+        m.stamp.sec = int(h.stamp)
+        m.stamp.nanosec = int((h.stamp - int(h.stamp)) * 1e9)
+        m.north, m.east, m.alt = float(h.north), float(h.east), float(h.alt)
+        m.cls, m.conf = h.cls, float(h.conf)
+        return m
+
+    def on_peer_hazard(self, m):
+        if m.origin_drone == self.me:
+            return                      # our own broadcast coming back
+        h = Hazard(m.hazard_id, m.origin_drone, m.seq,
+                   m.stamp.sec + m.stamp.nanosec * 1e-9,
+                   m.north, m.east, m.alt, m.cls, m.conf)
+        with self.hazard_lock:
+            outcome, superseded = self.registry.add_peer(h)
+            if outcome == 'new':
+                self._log_row(h, 'peer')
+            elif outcome == 'replaces':
+                self._log_row(superseded, 'superseded')
+                self._log_row(h, 'peer')
+        if outcome == 'repeat':
+            return
+        msg = {'new': 'added to swarm list',
+               'dup': 'duplicate of an earlier hazard, ignored',
+               'replaces': f"same object as our {superseded.hazard_id if superseded else ''}"
+                           f" and earlier - ours superseded"}[outcome]
+        self.get_logger().info(
+            f"peer hazard {h.hazard_id} at N={h.north:.1f} E={h.east:.1f}: {msg}")
 
     def on_image(self, msg, drone_idx=0):
         """Stash only. Timestamped on ARRIVAL: everything after this (queueing
@@ -600,12 +711,18 @@ class DetectorNode(Node):
         frame = self.img_to_np(msg)
         if frame is None:
             return
+        # Only build/publish the annotated image while something is watching it.
+        # Three detectors each pushing 3.7 MB frames that nobody subscribed to
+        # cut throughput from 8.0 to 3.3 fps per drone and pose from 50 to 22 Hz
+        # (measured 2 Oct). rqt_image_view / grab_frames.py subscribing turns it on.
+        annotate = (self.publish_annotated and d['pub_annot'] is not None
+                    and d['pub_annot'].get_subscription_count() > 0)
 
         # Gated off (climb / RTL / landing / no survey running): skip INFERENCE,
         # which is the expensive part, but keep republishing the raw frame so
         # rqt_image_view stays live. A frozen video feed looks like a crash.
         if not d['gate']:
-            if self.publish_annotated and d['pub_annot'] is not None:
+            if annotate:
                 d['pub_annot'].publish(self.np_to_img(frame, msg.header))
             return
         st = d['st']
@@ -644,7 +761,7 @@ class DetectorNode(Node):
             x1, y1, x2, y2 = [int(v) for v in box.xyxy[0].tolist()]
             u, v = (x1 + x2) / 2.0, (y1 + y2) / 2.0
 
-            if self.publish_annotated:
+            if annotate:
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
                 cv2.putText(frame, f"{name} {conf:.2f}", (x1, max(0, y1 - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
@@ -664,7 +781,7 @@ class DetectorNode(Node):
             if self.record_hazard(north, east, name, conf, -pose[2], drone_idx=drone_idx):
                 st['hits'] += 1
 
-        if self.publish_annotated and d['pub_annot'] is not None:
+        if annotate:
             d['pub_annot'].publish(self.np_to_img(frame, msg.header))
         st['t_frame'] += time.time() - t_start
 

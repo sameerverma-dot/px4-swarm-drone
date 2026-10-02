@@ -5,13 +5,14 @@ Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 A swarm of drones (2–5) autonomously surveys an area, detects suspected
 landmines from a downward camera, and produces a geotagged hazard map.
 
-**Status:** the loop is verified end to end — survey, detect, geotag, return,
-verify — for **one drone** (0.75 m geotag, zero false positives, 5 Sep) and for
-**two drones flying concurrent bands** (12 Sep: both `VERIFY PASS`, drone 1's
-detection folded into drone 0's frame to within 1.70 m). Remaining on software:
-a third drone, a multi-target map renderer, and landmine weights in place of the
+**Status:** a **decentralised 3-drone swarm** is flight-verified in simulation
+(2 Oct): every drone runs its own survey, detector and logs and needs no ground
+station; drones exchange heartbeats and hazard reports peer to peer; a drone
+that returns early or goes silent has its lanes taken over by a neighbour;
+detections are de-duplicated drone-to-drone; peers keep separation. Geotags land
+0.4–1.5 m from truth. Remaining on software: landmine weights in place of the
 COCO `person` stand-in. **Hardware (Track B) is 50 % of the grade and is at
-zero** — the project's largest risk. Details in `docs/PROGRESS.md` §9.
+zero** — the project's largest risk. Details in `docs/PROGRESS.md` §11.
 
 The governing constraint: detection needs ~24 px on target, which caps flight
 altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px). Altitude sets
@@ -36,27 +37,49 @@ ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0
 ros2 run perception hazard_map --area 0,30,0,20 --truth 10,15
 ```
 
-**Two drones:**
+**The swarm (3 drones by default):**
 
 ```bash
 # Terminal 1
-bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 2 --y-min 0 --y-max 60 gz_x500_mono_cam_down
+bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 3 --y-min 0 --y-max 90
 
 # Terminal 2 — one line at a time
 cd ~/px4_ros_ws && source install/setup.bash
 bash tools/check_system.sh                  # probes EVERY drone — want 0 failed
-NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh   # one target PER BAND
-ros2 launch survey swarm_mission.launch.py num_drones:=2 x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
-ros2 run perception hazard_map --area 0,30,0,60 --truth "15,15;15,45"
+NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash tools/add_swarm_targets.sh   # one target PER BAND
+ros2 launch survey swarm_mission.launch.py num_drones:=3 y_min:=0.0 y_max:=90.0
+ros2 run perception hazard_map --truth "15,15;15,45;15,75"      # newest run, no other args
 ```
 
-`num_drones`, `y_min` and `y_max` must be identical in all three of
-`start_px4_swarm.sh`, `add_swarm_targets.sh` and `swarm_mission.launch.py` —
-they compute the band geometry independently. Full runbooks with the failure
-modes: `docs/CHEATSHEET.md` §5.
+Each drone runs its own camera bridge, detector and survey node
+(`onboard.launch.py` — what each onboard computer would run). They talk only to
+each other, over `/swarm/heartbeat` and `/swarm/hazards`. The ground station
+that `swarm_mission` also starts is a passive monitor: kill it mid-flight and
+nothing changes. Each run writes everything to one folder,
+`~/maps/swarm_<stamp>/`.
 
-The survey nodes exit on their own after `VERIFY PASS`; the detector keeps
-running (Ctrl-C the launch when done).
+What the swarm does on its own:
+
+| Capability | What happens |
+|---|---|
+| Onboard autonomy | Flies its band, detects, logs, returns — no ground link needed |
+| Band takeover | A peer that returns early, or goes silent past its own projected finish, has its unfinished lanes flown by the nearest free drone |
+| Shared hazard list | Detections are broadcast drone-to-drone; an object a peer already logged (e.g. on a band boundary) is not logged again |
+| Separation | If a peer comes within 8 m / 5 m, the higher-id drone holds and moves vertically away until clear |
+
+Try the failure cases (fault injection, per drone):
+
+```bash
+ros2 launch survey swarm_mission.launch.py abort_after_lanes:="-1;-1;1"   # drone 2 goes home after 1 lane
+ros2 launch survey swarm_mission.launch.py start_delay:="0;26;0"          # drone 1 late -> separation yield
+```
+
+`num_drones`, `y_min` and `y_max` must be identical for `start_px4_swarm.sh`,
+`add_swarm_targets.sh` and `swarm_mission.launch.py` — they compute the band
+geometry independently. Full runbooks: `docs/CHEATSHEET.md` §5.
+
+The survey nodes exit on their own after `VERIFY`; the detectors keep running
+(Ctrl-C the launch when done).
 
 Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` — **not** `tmux
 kill-server`, which leaves PX4 and Gazebo running.

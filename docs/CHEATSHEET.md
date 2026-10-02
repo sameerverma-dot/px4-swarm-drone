@@ -25,6 +25,11 @@ Everything else (`~/Micro-XRCE-DDS-Agent`, `~/Downloads/QGroundControl.AppImage`
 | **Detector node** (YOLO + geotag) | `src/perception/perception/detector_node.py` |
 | Mission launch — 1 drone (survey + detect) | `src/survey/launch/mission.launch.py` |
 | Mission launch — **N drones** | `src/survey/launch/swarm_mission.launch.py` |
+| What ONE drone's onboard computer runs | `src/survey/launch/onboard.launch.py` |
+| Swarm decisions (takeover, separation) — no ROS, unit-tested | `src/survey/survey/swarm_logic.py` + `src/survey/test/` |
+| Shared hazard list (dedup rule) — unit-tested | `src/perception/perception/hazard_registry.py` + `src/perception/test/` |
+| Passive ground monitor | `src/perception/perception/ground_station.py` |
+| Peer messages (heartbeat, hazard report) | `src/swarm_msgs/msg/` |
 | Survey-only launch | `src/survey/launch/survey.launch.py` |
 | Perception-only launch | `src/perception/launch/perception.launch.py` |
 | Offline detector test | `src/perception/test_perception.py` |
@@ -148,7 +153,7 @@ Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` (from anywhere). **Not**
 
 ---
 
-## 5. Runbooks — 1 drone and 2 drones
+## 5. Runbooks — 1 drone and the swarm
 
 Two rules that apply to both, and cause most failed runs:
 
@@ -187,106 +192,85 @@ ros2 run rqt_image_view rqt_image_view /detection/image_annotated
 At 10 m altitude use `altitude:=10.0` and the 1280 px camera — 640 px at 10 m is
 below the ~24 px detection floor and will find nothing (`docs/SWARM_PLAN.md` §1).
 
-### 5b. Two drones
+### 5b. The swarm — 3 drones, decentralised
 
-Same shape, three differences: a different launcher, a target in **every** band,
-and one verification step you must not skip.
+Each drone runs its own camera bridge + detector + survey node
+(`src/survey/launch/onboard.launch.py`, what each onboard computer would run).
+Drones talk only to each other: `/swarm/heartbeat` (position, state, lanes,
+ETA, battery) and `/swarm/hazards` (shared hazard list). The `ground_station`
+node is a passive monitor; kill it and nothing changes.
 
 ```bash
 # ── Terminal 1 ─ own terminal, NOT inside tmux ───────────────────────────
-bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 2 --y-min 0 --y-max 60 gz_x500_mono_cam_down
-# (env-var form NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash ... works too)
-# instance 0 builds + hosts the world; instance 1 spawns into it 30 m east.
-# Only one drone visible in Gazebo is usually NOT a failure — the camera is
-# looking at instance 0 and instance 1 is off-screen to the east. Check the
-# topics, not the viewport.
+bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 3 --y-min 0 --y-max 90
+# instance 0 hosts the world; 1 and 2 spawn into it 30 m and 60 m east, each
+# sensor-checked ("drone 1: booting... sensors OK"). Every instance gets
+# COM_OBL_RC_ACT=3: if its onboard computer dies, PX4 flies it home.
 
 # ── Terminal 2 ─ one line at a time ──────────────────────────────────────
-cd ~/px4_ros_ws
-source install/setup.bash
-
-# VERIFY the second instance is actually alive before flying anything.
-# This project's most expensive bug was assuming a topic name. Note _v1:
-# this build publishes on the VERSIONED names only.
-ros2 topic echo /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once
-# One message of plausible numbers -> instance 1 is alive. An error or a hang
-# -> it never booted; read log/swarm_launch_*/px4_sitl_1.log before going on.
-#
-# It must be `echo`, not `hz`. In Humble ONLY `ros2 topic echo` takes
-# --qos-reliability; `ros2 topic hz` rejects it with "unrecognized arguments".
-# And bare `ros2 topic hz` on a /fmu/out/* topic usually prints nothing at all,
-# because it subscribes RELIABLE while PX4 publishes BEST_EFFORT — incompatible
-# QoS means no data, which looks identical to a dead instance. `echo --once`
-# is the test that actually answers the question.
-
-bash tools/check_system.sh      # auto-detects both instances, probes each
-mv ~/maps/hazard_points.csv ~/maps/hazard_points_$(date +%s).csv   # if one exists
-
-# A target in EVERY band — one per drone.
-NUM_DRONES=2 Y_MIN=0 Y_MAX=60 bash tools/add_swarm_targets.sh
-
-ros2 launch survey swarm_mission.launch.py num_drones:=2 \
-    x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
-# Every 5 s while flying, one health line per drone:
-#   drone 1 [OPEN] camera 9.6 fps, inferred 9.2 fps, pose 50 Hz, best person 0.78 ...
-# camera ~8-10, inferred ~= camera, pose ~50. A WARN line (DROPPED no-pose,
-# NO CAMERA FRAMES) names the drone and the broken link.
-# Both survey nodes exit by themselves after VERIFY; Ctrl-C the launch after.
-
-# Swarm map: every drone's track, shifted into drone 0's frame, one truth per band.
-ros2 run perception hazard_map --area 0,30,0,60 --truth "15,15;15,45"
-
-# ── Terminal 3 ─ optional, one viewer per drone ──────────────────────────
 cd ~/px4_ros_ws && source install/setup.bash
-ros2 run rqt_image_view rqt_image_view /detection/image_annotated_0
-# and in another: /detection/image_annotated_1
+bash tools/check_system.sh      # auto-detects 3 instances, probes each - want 0 FAIL
+NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash tools/add_swarm_targets.sh
+bash tools/add_target.sh 22 30 boundary_target    # optional: tests the shared hazard list
+ros2 launch survey swarm_mission.launch.py num_drones:=3 y_min:=0.0 y_max:=90.0
+ros2 run perception hazard_map --truth "15,15;15,45;15,75;22,30"   # newest run, no other args
+
+# ── Terminal 3 ─ optional ────────────────────────────────────────────────
+ros2 topic echo /swarm/heartbeat          # what the drones tell each other
+ros2 run rqt_image_view rqt_image_view /detection/image_annotated_1
+# (annotated frames are only built while something subscribes - see PROGRESS 11.4)
 ```
 
-**Every `gz` command needs `GZ_IP=127.0.0.1`, and so does every standalone PX4
-instance.** On this machine gz-transport *discovers* topics without it but does
-not *deliver* data — the distinction section 3 of `check_system.sh` measures
-separately. `start_px4_swarm.sh` sets it for you now; before it did, drone 1
-booted with no accelerometer, refused to arm, and its `/px4_1/fmu/out/...`
-topics were listed but silent for three runs straight. Same root cause as the
-camera bug in `docs/CAMERA_DIAGNOSTIC.md`. Measured 21 Sep: `gz topic -l`
-returns 36 topics bare and 51 with `GZ_IP=127.0.0.1`.
+Everything from one run lands in `~/maps/swarm_<stamp>/`: `run.json` (band
+math, so `hazard_map` needs no arguments), `survey_track_d<i>_*.csv`,
+`hazards_d<i>.csv` (each drone's onboard log - own AND peer hazards), and
+`ground_hazards.csv`.
 
-**`num_drones`, `y_min` and `y_max` must match in all three places** —
-`start_px4_swarm.sh`, `add_swarm_targets.sh`, and `swarm_mission.launch.py`.
-They each compute the band geometry independently and there is no shared source
-of truth between a shell script and a ROS launch file. Disagree on any of them
-and the drones fly bands that do not contain the targets, which looks exactly
-like a broken detector.
-
-**What "it worked" looks like** — the 12 Sep run:
-
-```
-[survey_node_0]: Survey ns='(none)' x[0.0,30.0] y[0.0,30.0] alt=10.0m -> 7 waypoints
-[detector_node]: drone 0 detection gate -> OPEN
-[detector_node]: drone 1 detection gate -> OPEN
-[detector_node]: HAZARD #1: person conf=0.72 at N=8.3 E=44.7 (alt 10.0m, drone 1)
-[survey_node_0]: VERIFY PASS | waypoints 7/7 (OK) | returned=True
-[survey_node_1]: VERIFY PASS | waypoints 7/7 (OK) | returned=True
-```
-
-The line that matters is the E=44.7. Drone 1's own local frame has its origin
-30 m east, so it saw that person at local E≈14.7 — and the detector added the
-30 m back on to put it in drone 0's frame. That is `home_offsets` working, and
-it is the whole point of the swarm run.
-
-### Scaling to 3
+**Fault injection** - ';'-separated, one value per drone:
 
 ```bash
-NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash ~/px4_ros_ws/tools/start_px4_swarm.sh gz_x500_mono_cam_down
-NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash tools/add_swarm_targets.sh
-ros2 launch survey swarm_mission.launch.py num_drones:=3 \
-    x_max:=30.0 y_min:=0.0 y_max:=90.0 altitude:=10.0
+ros2 launch survey swarm_mission.launch.py abort_after_lanes:="-1;-1;1"  # drone 2 home after 1 lane
+ros2 launch survey swarm_mission.launch.py start_delay:="0;26;0"         # drone 1 late -> separation
+# A dead onboard computer: kill drone 2's survey_node_2, detector_node_2 and
+# camera_bridge_2 (PIDs are in the launch log) mid-flight.
 ```
 
-Keep the **band height** at 30 m as you add drones (so `Y_MAX = 30 × N`) rather
-than subdividing a fixed area. At 10 m altitude lane spacing is ~16.6 m, so a
-band much narrower than that gives a drone a single pass with nothing to divide
-— the swarm stops demonstrating anything (`docs/SWARM_PLAN.md` §4).
+**What it looks like when it works** (2 Oct flights):
+
+```
+# takeover after an early return - the NEIGHBOUR takes it, not the first one done
+[survey_node_2]: EARLY RETURN: TEST hook abort_after_lanes=1
+[survey_node_0]: HOLD: band 2 unfinished (better-placed peer should take it)
+[survey_node_1]: TAKEOVER: band 2 lanes 1..2 (drone 2 returned early)
+[survey_node_1]: VERIFY PASS | drone 1 | own lanes 3/3 | took over: band 2 lanes 1-2 | ...
+
+# silent drone - wait until it would have finished anyway, then take over
+[survey_node_1]: peer 2 SILENT (last heard 3.2 s ago: SURVEY, lanes 1/3, eta 30 s)
+[survey_node_1]: HOLD: band 2: owner silent, may still be flying it - not entering for another 22 s
+[survey_node_1]: TAKEOVER: band 2 lanes 1..2 (drone 2 silent past its ETA)
+
+# shared hazard list at a band boundary
+[detector_node_0]: saw person 0.66 at N=22.5 E=29.8 - already logged by drone 1 as d1-1 (0.1 m away), not logged again
+
+# separation
+[survey_node_1]: SEPARATION: peer 0 at 6.4 m horizontal / 5.0 m vertical -> yielding: hold position, go to 5.0 m
+[survey_node_1]: SEPARATION: peer 0 clear -> resuming
+```
+
+Every 5 s per drone the detector prints a health line - `camera ~8 fps,
+inferred ~= camera, pose ~50 Hz`. Lower than that, or a WARN naming a drone
+(`DROPPED no-pose`, `NO CAMERA FRAMES`), is the first thing to look at.
+
+**Every `gz` command needs `GZ_IP=127.0.0.1`, and so does every standalone PX4
+instance.** gz-transport *discovers* topics without it but does not *deliver*
+data (`docs/CAMERA_DIAGNOSTIC.md`); `start_px4_swarm.sh` sets it for you.
+
+**`num_drones`, `y_min` and `y_max` must match** for `start_px4_swarm.sh`,
+`add_swarm_targets.sh` and `swarm_mission.launch.py` - they compute the band
+geometry independently. Disagree and the drones fly bands that do not contain
+the targets, which looks exactly like a broken detector. Keep the band at 30 m
+per drone (`Y_MAX = 30 x N`): much narrower than one lane spacing (~16.6 m at
+10 m altitude) and the swarm has nothing to divide (`docs/SWARM_PLAN.md` §4).
 
 ### 5c. Every knob, and what it costs you
 

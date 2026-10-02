@@ -15,3 +15,7 @@ yolov8n.pt
 .env
 *.pem
 *.key
+working_doc/
+
+# pytest run caches (src/*/.pytest_cache, ./.pytest_cache)
+.pytest_cache/

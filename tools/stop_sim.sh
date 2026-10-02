@@ -16,20 +16,22 @@ set -uo pipefail
 ALL=0
 [[ "${1:-}" == "--all" ]] && ALL=1
 
-# pgrep/pkill -f patterns, most-dependent first
+# pgrep -f patterns, most-dependent first. ANCHORED (^) to the start of the
+# command line, i.e. to the executable itself: an unanchored 'ros2 launch
+# survey' or 'gz sim' also matched any shell, editor or watcher whose command
+# line merely CONTAINED that text, and killed it (seen 2 Oct, when the cleanup
+# inside start_px4_sim.sh took out an unrelated shell that mentioned it).
 PATTERNS=(
-    "ros2 launch survey"
-    "ros2 launch perception"
-    "survey/lib/survey/survey_node"
-    "perception/lib/perception/detector_node"
-    "parameter_bridge .*camera/image"
-    "MicroXRCEAgent"
-    "make px4_sitl"
-    "px4_sitl_default"
-    "gz sim"
-    "gz-sim"
+    "^([^ ]*python3 [^ ]*/ros2|timeout [0-9]+ ros2) launch (survey|perception)( |$)"
+    "^[^ ]*python3 [^ ]*/lib/(survey/survey_node|perception/detector_node|perception/ground_station)( |$)"
+    "^[^ ]*/parameter_bridge [^ ]*camera/image"
+    "^[^ ]*MicroXRCEAgent( |$)"
+    "^make px4_sitl( |$)"
+    "^(/bin/sh -c )?(cd |cmake --build |/usr/bin/cmake -E env )[^ ]*.*px4_sitl_default"
+    "^[^ ]*px4_sitl_default/bin/px4( |$)"
+    "^gz sim( |$)"
 )
-[[ $ALL -eq 1 ]] && PATTERNS+=("QGroundControl")
+[[ $ALL -eq 1 ]] && PATTERNS+=("^[^ ]*QGroundControl")
 
 for s in px4_sim px4_swarm; do
     tmux kill-session -t "$s" 2>/dev/null && echo "tmux session '$s' closed"

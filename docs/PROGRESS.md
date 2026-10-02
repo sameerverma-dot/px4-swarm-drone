@@ -1,11 +1,11 @@
 # Project Progress — Autonomous Swarm Drone System for Landmine Detection & Mapping (Phase I)
 ### Maker Bhavan Project Course · IIT Gandhinagar · Mentor: Aniruddh Mali
 
-_Last updated: 27 Sep 2026 (**the 2-drone swarm is reliable, not just possible**:
-two consecutive flights with BOTH drones detecting their own target, 0.74-1.21 m
-from truth. Six bugs fixed first - drone 1's hits were being silently dropped, the
-detector spent 85 % of each frame on one slow rclpy assignment, and every mission
-deadlocked after VERIFY. Section 10.)_
+_Last updated: 2 Oct 2026 (**decentralised 3-drone swarm, flight-verified**: each
+drone flies, detects and logs on its own; peers exchange heartbeats and hazard
+reports directly; an early-returning or silent drone's lanes are taken over by
+its neighbour; band-boundary detections are de-duplicated drone-to-drone; peers
+keep separation (closest approach 5.19 m in a forced conflict). Section 11.)_
 _Companion docs: `STACK_README.md` (how to run), `PHASE1_ROADMAP.md` (plan)._
 
 ---
@@ -17,13 +17,16 @@ A single drone autonomously surveys a specified area and returns, via two
 independent paths (a QGroundControl Survey mission, and a custom ROS 2 node).
 ### Where this actually stands
 
-**The 2-DRONE SWARM is complete** as of 21 Sep (section 9.5): two drones, two
-bands, a detection in each, both folded into one shared frame. That closes the
-headline software requirement. The single-drone loop below remains the
-accuracy baseline everything is measured against.
+**A DECENTRALISED 3-DRONE SWARM is flight-verified** as of 2 Oct (section 11):
+each drone flies, detects and logs on its own; drones exchange heartbeats and
+hazards peer to peer; early-returning or silent drones have their lanes taken
+over by a neighbour; peers keep separation. That closes the headline software
+requirement. The single-drone loop below remains the accuracy baseline
+everything is measured against.
 
-Remaining on the software side: a third drone, a multi-target map renderer, and
-landmine weights in place of the COCO stand-in. **Hardware (Track B) is 50 % of
+Remaining on the software side: landmine weights in place of the COCO stand-in
+(it is now the weakest link, ~88 % per pass), and a compute budget for real
+onboard detection (section 11.5). **Hardware (Track B) is 50 % of
 the grade and is still at zero** — it is now the project's largest risk.
 
 **Verified on 5 Sep**, one command, unattended:
@@ -73,12 +76,12 @@ there is still only one drone.
 | Downward camera model in sim (`x500_mono_cam_down`) | ✅ Model + airframe confirmed |
 | Gazebo camera → ROS 2 bridge (`ros_gz_bridge`) | ✅ Configured & launches |
 | YOLO detector node (`perception`) | ✅ **Working on GPU** (cuda:0, RTX 4060, fp16, imgsz 640) |
-| Pipeline throughput | ✅ every frame inferred, ~8-10 fps **per drone** with 2 drones — the "~2 Hz" cause found and fixed (10.3) |
+| Pipeline throughput | ✅ every frame inferred, ~8 fps **per drone with 3 onboard detectors**, pose 50 Hz (11.4) |
 | **Camera frames reaching ROS 2 / YOLO** | ✅ **SOLVED** — was a `GZ_IP` mismatch (section 5) |
 | Geotagged hazard map / CSV | ✅ **Working & calibrated** (cross-track error < 0.5 m) |
 | Full mission (survey + detect + RTL) in one launch | ✅ `VERIFY PASS \| waypoints 11/11 \| returned=True` |
 | Camera capture 1280x960 + imgsz to match | ✅ Built & live-verified (section 8.1) |
-| **Multi-drone swarm (2–5)** | ✅ **2 drones reliable 27 Sep — two consecutive flights, BOTH drones detect every time, 0.74-1.21 m, nodes exit cleanly (section 10.6).** 🟡 3+ untried |
+| **Multi-drone swarm (2–5)** | ✅ **3 drones, decentralised, 2 Oct — onboard autonomy, band takeover (early return + silent drone), shared hazard list, peer separation, all flight-verified (section 11)** |
 | Geotag accuracy vs known target | ✅ 0.75 m |
 | False-positive rejection (`conf` 0.65) | ✅ 0 / 1 detections this run |
 | Hazard map render (PNG + GeoJSON) | ✅ `ros2 run perception hazard_map` |
@@ -709,3 +712,121 @@ pose 50 Hz and ~8-10 inferred fps per drone throughout. Single-drone regression
   lane are both at global E=30, same altitude, at different times. Lockstep keeps
   them 30 m apart; a start desync of >~15 s would put two drones on one line.
 - Three drones still untested. Hardware (Track B) still at zero.
+
+---
+
+## 11. Decentralised 3-drone swarm — 2 Oct
+
+Section 10 had ONE detector watching every camera - in effect a ground station.
+The swarm is now decentralised: each drone runs its own stack, the way each
+onboard computer (Pi) would, and drones coordinate only with each other.
+
+### 11.1 Architecture
+
+```
+drone i (onboard.launch.py)                       peers                ground (optional)
+  camera_bridge_i  -> detector_node_i  --- /swarm/hazards   <->  drones j, k  ->  ground_station
+                       (own camera, own log, shared list)                           (passive: publishes
+  survey_node_i  ----------------------- /swarm/heartbeat <->  drones j, k  ->       nothing)
+                       (own band, takeover, separation)
+```
+
+* `swarm_msgs` (new package): `DroneHeartbeat` (id, state, shared-frame position,
+  band/lane, lanes done, claimed band, ETA, battery) at 4 Hz; `HazardReport`
+  (id `d<drone>-<n>`, stamp, position, class, conf), RELIABLE + TRANSIENT_LOCAL
+  so a late joiner gets the history.
+* `survey/swarm_logic.py`: every swarm decision as plain Python - band geometry,
+  orphan detection, who claims, separation right of way. **20 unit tests.**
+* `perception/hazard_registry.py`: the shared-list dedup rule. **5 unit tests.**
+* `survey_node.py`: unchanged behaviour with `drone_id` unset (single-drone
+  regression flown, PASS); swarm mode adds heartbeat, takeover, separation and
+  early-return triggers (battery, PX4 failsafe, a peer claiming its band).
+* `onboard.launch.py` (one drone) and `swarm_mission.launch.py` (N x onboard +
+  passive `ground_station`). Each run gets `~/maps/swarm_<stamp>/` with a
+  `run.json`, so `hazard_map` renders a run with no arguments.
+* Launcher: 3 drones by default; every PX4 instance gets `COM_OBL_RC_ACT=3`.
+  The default (0, Position mode) with no RC stick means a drone whose Pi dies
+  **hovers in its band forever** - exactly where a neighbour will fly to take it
+  over. Return mode clears the airspace. Verified in flight C.
+
+### 11.2 The rules
+
+**Takeover.** A band is orphaned when its owner (a) announced RETURNING/LANDED
+with lanes left - immediately; (b) went silent - but only after its *own
+projected finish* (last heartbeat + its ETA + 15 s): a silent drone may just
+have lost its radio and still be flying its band, which onboard autonomy says it
+should; or (c) was never heard within 45 s of start. The claimer is the drone
+nearest the band (ties -> lower id) among those idle or within 20 s of done, so
+the *neighbour* gets it rather than whoever finished first. Claims are in the
+heartbeat; two simultaneous claims resolve to the better-placed drone; a drone
+whose band is claimed by a live peer goes home.
+
+**Separation.** Inside 8 m horizontal / 5 m vertical, the higher-id drone holds
+position and moves vertically away - never through the other drone (if below,
+it stays below). If the other drone is under PX4 control (RTL), whoever is still
+in offboard yields. Resume after the peer is 10 m away for 2 s. On top of
+altitude separation: takeover transits fly a per-drone layer (survey + 3 + id m)
+and PX4 RTL altitudes are staggered 30/35/40 m.
+
+**Shared hazards.** Two reports within 4.5 m are one object; the earlier stamp
+wins, ties to the lower drone. Every drone applies the same rule, so all lists
+converge - every drone lands with the swarm's whole map.
+
+### 11.3 Flight results
+
+One sim session, 3 drones, `y=[0,90]`, 10 m, 1280 px, conf 0.65; a person at
+each band centre (15,15), (15,45), (15,75), plus one ON the band 0/1 boundary
+at (22,30).
+
+| flight | scenario | result |
+|---|---|---|
+| A | nominal | all 3 `VERIFY PASS`; 4/4 targets, 0.67-1.89 m; the boundary target logged once (drone 1) and every drone's list converged to the same 4 |
+| B | drone 2 `abort_after_lanes=1`; ground station **killed at T+40 s** | drone 2 home after lane 0 (`PARTIAL`); drone 0 finished first but **held for the neighbour**; drone 1 took over band 2 lanes 1-2 and **found band 2's target there** (1.16 m); mission unaffected by the dead ground station |
+| C | drone 2's onboard computer **killed** (survey, detector, camera) after lane 0 | PX4 2: `Failsafe activated -> RTL -> landed`. Peers: `SILENT ... eta 30 s`, held `not entering for another 22 s`, drone 1 claimed **at the deadline**, took over lanes 1-2, found band 2's target (1.12 m) |
+| D | drone 1 `start_delay=26` - still climbing on its pad when drone 0's last lane arrives there | drone 1 `SEPARATION ... yielding: hold, go to 5.0 m`, resumed 6.7 s later; **closest approach 5.19 m** (0.74 m horizontal, 5.1 m vertical, from the tracks); all `PASS` |
+| single | `mission.launch.py`, 1 drone (regression) | `VERIFY PASS 7/7`, 1 hit 0.95 m, clean exit |
+
+Detection: 15 of 17 band-target passes logged a hit. Both misses were seen at
+0.52-0.59 against the 0.65 threshold - the COCO `person` stand-in at 10 m, not
+the swarm. Boundary target: 4 of 4, always exactly once.
+
+### 11.4 Bugs found by flying it
+
+- **Unwatched annotated images throttled all three detectors.** Each detector
+  re-published every frame as a 3.7 MB annotated image whether or not anything
+  subscribed. With three drones: 3.3 fps inferred, pose 22 Hz, YOLO 86 ms. Now
+  only built while something subscribes: **8.2 fps, 50 Hz, 15 ms** - the
+  two-drone figures, with three. This, not the GPU, was the 3-drone ceiling.
+- **First lane uninspected.** YOLO's first inference does its CUDA warm-up; it
+  landed on the first gated frame, and three detectors warming up at once left
+  5-20 s of every drone's first lane at "inferred 0.0 fps". Warm-up now runs at
+  startup (2.5 s, on the pad).
+- `ground_station` crashed on the first hazard (`origin_drone` vs `origin`) -
+  which incidentally showed the drones don't need it.
+- Swarm-mode waypoints were built before the band geometry existed (caught by a
+  launch dry run before any flight).
+- `stop_sim.sh`'s unanchored `pkill -f` patterns killed any process whose command
+  line merely *mentioned* `ros2 launch survey` or `gz sim` - including, via
+  `start_px4_sim.sh`'s cleanup, an unrelated shell. Patterns now match the
+  executables only (`^make px4_sitl`, `^gz sim`, ...).
+
+### 11.5 Still open
+
+- **Detection is the weak link, and it is the model.** ~88 % per pass with COCO
+  `person` at 10 m; misses sit at 0.5-0.6. Trained nadir weights are the fix;
+  lowering `conf` re-admits false positives (seen at 0.71 on 8 Sep).
+- **Onboard compute is assumed, not budgeted.** In sim each "Pi" is a process on
+  an RTX 4060 (15 ms/frame at imgsz 1280). A Raspberry Pi's CPU would manage a
+  small fraction of 1 fps at that size - too few looks per pass. Real onboard
+  detection needs an accelerator (Pi 5 + Hailo/Coral, or a Jetson) or a smaller
+  `imgsz` with a lower altitude. Decide before buying hardware.
+- **A silent drone that is still flying is invisible to separation.** The
+  deadline rule keeps takeovers out of its band until it would have finished,
+  and the offboard-loss RTL clears a dead Pi's drone; a drone whose radio dies
+  but keeps flying *past* its ETA is not covered.
+- Takeover of a takeover is not handled (a drone dying mid-takeover leaves those
+  lanes unflown - logged, not re-assigned).
+- Hazard stamps use wall clock; on real Pis they need NTP/GPS time for "earlier
+  wins" to mean earlier (lists still converge without it).
+- The band boundary is still flown twice (drone i's last lane, drone i+1's first).
+- Hardware (Track B) still at zero.

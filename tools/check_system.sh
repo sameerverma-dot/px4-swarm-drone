@@ -298,7 +298,7 @@ if [[ $fail -eq 0 ]]; then
     printf "\n  Everything probed is working. Fly it:\n"
     printf "    ${D}cd %s && source install/setup.bash${N}\n" "$WS"
     if [[ $NUM_DRONES -gt 1 ]]; then
-        printf "    ${D}ros2 launch survey swarm_mission.launch.py num_drones:=%d y_min:=0.0 y_max:=60.0 altitude:=10.0${N}\n" "$NUM_DRONES"
+        printf "    ${D}ros2 launch survey swarm_mission.launch.py num_drones:=%d y_min:=0.0 y_max:=%d.0${N}\n" "$NUM_DRONES" "$((30 * NUM_DRONES))"
         printf "    ${D}(y_min/y_max must match what start_px4_swarm.sh was given)${N}\n"
     else
         printf "    ${D}ros2 launch survey mission.launch.py x_max:=30.0 y_max:=20.0 altitude:=10.0${N}\n"

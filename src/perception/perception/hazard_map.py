@@ -125,9 +125,42 @@ def read_hazards(path):
                     'alt': float(r['alt_m']),
                     # absent in pre-swarm CSVs
                     'drone': (r.get('drone') or '').strip(),
+                    'id': (r.get('hazard_id') or '').strip(),
+                    'status': (r.get('status') or '').strip(),
                 })
             except (KeyError, TypeError, ValueError):
                 continue
+    return out
+
+
+def newest_run_dir(maps_dir):
+    """Newest ~/maps/swarm_*/ that has a run.json (written by swarm_mission)."""
+    runs = [d for d in glob.glob(os.path.join(maps_dir, 'swarm_*'))
+            if os.path.isfile(os.path.join(d, 'run.json'))]
+    return max(runs, key=run_mtime) if runs else None
+
+
+def run_mtime(run_dir):
+    return max(os.path.getmtime(p) for p in glob.glob(os.path.join(run_dir, '*')))
+
+
+def read_run_hazards(run_dir):
+    """Every drone's onboard log plus the ground copy, merged by hazard_id.
+
+    Each drone logs its own finds AND its peers', so the files overlap by
+    design; an id marked 'superseded' anywhere (two drones logged the same
+    object, the other report was canonical) is dropped everywhere."""
+    rows = []
+    for p in sorted(glob.glob(os.path.join(run_dir, 'hazards_d*.csv'))) + \
+            glob.glob(os.path.join(run_dir, 'ground_hazards.csv')):
+        rows += read_hazards(p)
+    dead = {r['id'] for r in rows if r['status'] == 'superseded'}
+    out, seen = [], set()
+    for r in sorted(rows, key=lambda r: r['t']):
+        if r['id'] in dead or r['id'] in seen or r['status'] == 'superseded':
+            continue
+        seen.add(r['id'])
+        out.append(r)
     return out
 
 
@@ -184,7 +217,12 @@ def main(argv=None):
                     help='swarm band math - same value given to the launcher (default 0)')
     ap.add_argument('--y-max', type=float, default=60.0,
                     help='swarm band math - same value given to the launcher (default 60)')
-    ap.add_argument('--hazards', default=os.path.join(maps_dir, 'hazard_points.csv'))
+    ap.add_argument('--run', default=None, metavar='DIR|latest',
+                    help='a swarm run directory (~/maps/swarm_<stamp>); band math, area '
+                         'and every drone\'s logs come from it. Default: the newest run, '
+                         'if it is newer than the newest loose track')
+    ap.add_argument('--hazards', default=None,
+                    help='hazard CSV (default ~/maps/hazard_points.csv, or the run\'s logs)')
     ap.add_argument('--out', default=None, help='output path WITHOUT extension')
     ap.add_argument('--area', default=None,
                     help='survey rectangle x_min,x_max,y_min,y_max (NED metres)')
@@ -214,7 +252,29 @@ def main(argv=None):
     # tracks: list of (label, path, east_offset_m)
     tracks = []
     swarm_n = a.swarm
-    if a.track:
+    run_dir = None
+    if a.run:
+        run_dir = newest_run_dir(maps_dir) if a.run == 'latest' else os.path.expanduser(a.run)
+        if not run_dir or not os.path.isfile(os.path.join(run_dir, 'run.json')):
+            sys.exit(f"--run: no run.json in {run_dir or maps_dir + '/swarm_*'}")
+    elif not a.track and a.swarm is None:
+        rd, nt = newest_run_dir(maps_dir), newest_track(maps_dir)
+        if rd and (nt is None or run_mtime(rd) >= os.path.getmtime(nt)):
+            run_dir = rd
+    if run_dir:
+        with open(os.path.join(run_dir, 'run.json')) as f:
+            cfg = json.load(f)
+        swarm_n, a.y_min, a.y_max = int(cfg['num_drones']), cfg['y_min'], cfg['y_max']
+        a.area = a.area or f"{cfg['x_min']},{cfg['x_max']},{cfg['y_min']},{cfg['y_max']}"
+        found = newest_swarm_tracks(run_dir, swarm_n)
+        if not found:
+            sys.exit(f"no survey_track_d<i>_*.csv in {run_dir} - did the drones land?")
+        missing = [i for i in range(swarm_n) if i not in found]
+        if missing:
+            print(f"[hazard_map] WARNING: no track for drone(s) {missing}")
+        paths = [found[i] for i in sorted(found)]
+        print(f"[hazard_map] run {run_dir}: {swarm_n} drones, y=[{a.y_min:g},{a.y_max:g}]")
+    elif a.track:
         paths = [os.path.expanduser(p) for p in a.track]
         for p in paths:
             if not os.path.exists(p):
@@ -265,7 +325,6 @@ def main(argv=None):
         else:
             tracks.append(('', p, 0.0))
 
-    haz_path = os.path.expanduser(a.hazards)
     track_pts = {}      # path -> [(t, north, east_in_drone0_frame, alt)]
     for label, p, off in tracks:
         pts = read_track(p)
@@ -274,7 +333,12 @@ def main(argv=None):
         track_pts[p] = [(t, n, e + off, alt) for t, n, e, alt in pts]
     track = [pt for pts in track_pts.values() for pt in pts]
     track_path = paths[-1]
-    hazards = read_hazards(haz_path)
+    if a.hazards:
+        hazards = read_hazards(os.path.expanduser(a.hazards))
+    elif run_dir:
+        hazards = read_run_hazards(run_dir)
+    else:
+        hazards = read_hazards(os.path.join(maps_dir, 'hazard_points.csv'))
 
     n_raw = len(hazards)
     if a.classes:
@@ -288,6 +352,8 @@ def main(argv=None):
 
     if a.out:
         out = os.path.expanduser(a.out)
+    elif run_dir:
+        out = os.path.join(run_dir, 'hazard_map')
     elif band_h is not None:
         m = SWARM_TRACK_RE.search(os.path.basename(track_path))
         out = os.path.join(maps_dir, f"hazard_map_swarm_{m.group(2) if m else 'run'}")

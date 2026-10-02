@@ -1,182 +1,126 @@
 """
-swarm_mission.launch.py — the Phase I loop, scaled to N drones.
+swarm_mission.launch.py - the decentralised N-drone survey (default: 3 drones).
 
-Splits ONE survey area into N contiguous bands along EAST (PX4 local NED y),
-one band per drone, and flies them concurrently. One shared detector node
-watches all N cameras and owns ONE hazard list, so deduplication stays
-correct instead of something to bolt on afterwards (SWARM_PLAN.md section 2,
-NEXT_SESSION.md's ordered plan).
+Starts onboard.launch.py once per drone - each drone runs its OWN camera
+bridge, detector and survey node, the way each onboard computer would - plus
+an optional, passive ground station. Drones coordinate only drone-to-drone:
+
+    /swarm/heartbeat   position, state, lanes, ETA, battery     (survey_node)
+    /swarm/hazards     geotagged detections, shared list        (detector_node)
+
+Capabilities (see survey_node.py / swarm_logic.py / hazard_registry.py):
+  1. onboard autonomy  - no node on a drone listens to the ground; kill the
+                         ground station mid-flight and nothing changes
+  2. band takeover     - a drone that returns early, or goes silent past its
+                         own projected finish, has its lanes flown by the
+                         nearest available peer
+  3. shared hazards    - each drone de-duplicates against its peers' finds,
+                         e.g. an object on a band boundary is logged once
+  4. separation        - a drone holds and moves vertically away if a peer gets
+                         within sep_horizontal_m / sep_vertical_m
 
 --------------------------------------------------------------------------
-PRE-REQ: the sim must already be running with N PX4 instances 0..N-1,
-spawned with THE SAME num_drones/y_min/y_max/model this launch file gets -
-they must agree on the band math, because the sim (spawn pose) and this
-launch file (survey area + detector home_offsets) compute it independently:
-
-    bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 2 \\
-        --y-min 0.0 --y-max 60.0 gz_x500_mono_cam_down
-
-Then verify the namespace is actually live BEFORE flying anything - this
-project's single most expensive bug was assuming a topic name without
-checking (see NEXT_SESSION.md):
-
-    ros2 topic echo /px4_1/fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once
-
-Then:
-
-    ros2 launch survey swarm_mission.launch.py num_drones:=2 \\
-        x_max:=30.0 y_min:=0.0 y_max:=60.0 altitude:=10.0
+    bash ~/px4_ros_ws/tools/start_px4_swarm.sh --num-drones 3 --y-min 0 --y-max 90
+    bash ~/px4_ros_ws/tools/check_system.sh
+    NUM_DRONES=3 Y_MIN=0 Y_MAX=90 bash ~/px4_ros_ws/tools/add_swarm_targets.sh
+    ros2 launch survey swarm_mission.launch.py num_drones:=3 y_min:=0.0 y_max:=90.0
+    ros2 run perception hazard_map            # renders the newest run directory
 --------------------------------------------------------------------------
 
-Band math (must match tools/start_px4_swarm.sh exactly):
-    band_h    = (y_max - y_min) / num_drones
-    drone i local frame origin = global (north=0, east = y_min + i*band_h)
-      -> spawn pose offset (gz world x,y) = (y_min + i*band_h, 0)
-         [gz world x -> PX4 East, gz world y -> PX4 North; see
-         NEXT_SESSION.md section 1.3's calibration]
-      -> each drone's OWN survey_node then flies the SAME local box every
-         time: x=[x_min,x_max], y=[0, band_h] - only the sim spawn differs.
-      -> detector home_offsets add (0, y_min + i*band_h) back on, so every
-         drone's hazards land in ONE shared frame (drone 0's home).
+Everything a run writes goes in ONE directory, ~/maps/swarm_<YYYYmmdd_HHMMSS>/:
+    run.json                  the band math, so hazard_map needs no arguments
+    survey_track_d<i>_<t>.csv each drone's flown path (its own local frame)
+    hazards_d<i>.csv          each drone's onboard log: own + peer hazards
+    ground_hazards.csv        the ground station's merged copy (if it ran)
 
-Outputs land in ~/maps/ :
-    survey_track_d<i>_<ts>.csv   each drone's flown path
-    hazard_points.csv            ONE combined, deduplicated hazard list
+Band math (must match tools/start_px4_swarm.sh): band_h = (y_max-y_min)/N,
+drone i spawns at shared east y_min + i*band_h and flies band i.
+
+Fault injection for testing, ';'-separated per drone:
+    start_delay:="0;23;0"           drone 1 starts 23 s late
+    abort_after_lanes:="-1;-1;1"    drone 2 returns early after 1 lane
 """
 
+import importlib.util
+import json
 import os
+import time
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction, TimerAction
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
-def _launch_setup(context, *args, **kwargs):
-    survey_share = get_package_share_directory('survey')
-    perception_share = get_package_share_directory('perception')
+def _onboard_args():
+    path = os.path.join(get_package_share_directory('survey'), 'launch', 'onboard.launch.py')
+    spec = importlib.util.spec_from_file_location('onboard_launch', path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return path, mod.ARGS
 
-    g = lambda name: LaunchConfiguration(name).perform(context)  # noqa: E731
-    num_drones = max(1, int(g('num_drones')))
-    x_min, x_max = g('x_min'), g('x_max')
-    y_min_g, y_max_g = float(g('y_min')), float(g('y_max'))
-    world = g('world')
-    model = g('model')
-    if y_max_g <= y_min_g:
-        raise RuntimeError(f"y_max ({y_max_g}) must be greater than y_min ({y_min_g})")
-    band_h = (y_max_g - y_min_g) / num_drones
 
-    cam_topics, pose_ns, gate_topics, offsets = [], [], [], []
-    survey_includes = []
-    for i in range(num_drones):
-        east_offset = y_min_g + i * band_h
-        ns = '' if i == 0 else f'/px4_{i}'
-        gate_topic = f'/survey/detecting_{i}'
-        cam_topic = f'/world/{world}/model/{model}_{i}/link/camera_link/sensor/camera/image'
+def _per_drone(value, n, default):
+    items = [s.strip() for s in value.split(';')] if value.strip() else []
+    if items and len(items) != n:
+        raise RuntimeError(f"expected {n} ';'-separated entries, got {value!r}")
+    return items or [default] * n
 
-        pose_ns.append(ns)
-        gate_topics.append(gate_topic)
-        cam_topics.append(cam_topic)
-        offsets.append(f'0,{east_offset}')
-        # NOTE: do NOT pass annotated_topics from here. detector_node.py already
-        # appends a per-drone suffix itself (_per_drone_topic: base + '_i'
-        # whenever n > 1), so the singular default /detection/image_annotated
-        # becomes /detection/image_annotated_0 and _1 on its own. Passing
-        # '/detection/image_annotated_{i}' in as the BASE made it suffix twice,
-        # and the 21 Sep run published on /detection/image_annotated_0_0 and
-        # _1_1 - topics no viewer was watching. The problem this was meant to
-        # solve did not exist.
 
-        survey = IncludeLaunchDescription(
-            PythonLaunchDescriptionSource(
-                os.path.join(survey_share, 'launch', 'survey.launch.py')),
-            launch_arguments={
-                'node_name': f'survey_node_{i}',
-                'namespace': ns,
-                'csv_prefix': f'survey_track_d{i}',
-                'detect_topic': gate_topic,
-                'x_min': x_min, 'x_max': x_max,
-                'y_min': '0.0', 'y_max': f'{band_h}',
-                'altitude': g('altitude'),
-                'lane_spacing': g('lane_spacing'),
-                'sidelap': g('sidelap'),
-                'yaw_mode': g('yaw_mode'),
-                'fixed_yaw_deg': g('fixed_yaw_deg'),
-                'yaw_deadzone_m': g('yaw_deadzone_m'),
-                'rtl_on_complete': g('rtl_on_complete'),
-                'lookahead_m': g('lookahead_m'),
-            }.items(),
-        )
-        survey_includes.append(survey)
+def _setup(context, *args, **kwargs):
+    onboard_path, onboard_args = _onboard_args()
+    g = lambda k: LaunchConfiguration(k).perform(context)  # noqa: E731
+    n = max(1, int(g('num_drones')))
+    y_min, y_max = float(g('y_min')), float(g('y_max'))
+    if y_max <= y_min:
+        raise RuntimeError(f"y_max ({y_max}) must be greater than y_min ({y_min})")
 
-    perception = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(perception_share, 'launch', 'perception.launch.py')),
-        launch_arguments={
-            'weights': g('weights'),
-            'conf': g('conf'),
-            'classes': g('classes'),
-            'imgsz': g('imgsz'),
-            'pose_lag_s': g('pose_lag_s'),
-            'max_alt_m': g('max_alt_m'),
-            'require_gate': g('require_gate'),
-            'image_topics': ';'.join(cam_topics),
-            'pose_namespaces': ';'.join(pose_ns),
-            'gate_topics': ';'.join(gate_topics),
-            'home_offsets': ';'.join(offsets),
-        }.items(),
-    )
+    run_dir = g('run_dir').strip() or os.path.join(
+        '~/maps', time.strftime('swarm_%Y%m%d_%H%M%S'))
+    run_dir_abs = os.path.expanduser(run_dir)
+    os.makedirs(run_dir_abs, exist_ok=True)
+    with open(os.path.join(run_dir_abs, 'run.json'), 'w') as f:
+        json.dump({'num_drones': n, 'x_min': float(g('x_min')), 'x_max': float(g('x_max')),
+                   'y_min': y_min, 'y_max': y_max, 'altitude': float(g('altitude')),
+                   'started': time.strftime('%Y-%m-%d %H:%M:%S')}, f, indent=2)
+    print(f"[swarm_mission] run directory: {run_dir_abs}")
 
-    # Perception first (bridges + shared detector must be subscribed before
-    # any drone starts flying, same reasoning as mission.launch.py), all N
-    # survey nodes delayed together so their lanes are watched from lane 1.
-    delayed_survey = TimerAction(period=float(g('survey_delay')), actions=survey_includes)
+    delays = _per_drone(g('start_delay'), n, '0.0')
+    aborts = _per_drone(g('abort_after_lanes'), n, '-1')
 
-    return [perception, delayed_survey]
+    actions = []
+    for i in range(n):
+        la = {k: g(k) for k in onboard_args if k not in ('drone_id', 'run_dir',
+                                                          'start_delay_s', 'abort_after_lanes')}
+        la.update({'drone_id': str(i), 'run_dir': run_dir_abs,
+                   'start_delay_s': delays[i], 'abort_after_lanes': aborts[i]})
+        actions.append(IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(onboard_path), launch_arguments=la.items()))
+
+    if g('ground_station').lower() in ('1', 'true', 'yes'):
+        actions.append(Node(package='perception', executable='ground_station',
+                            name='ground_station', output='screen',
+                            parameters=[{'run_dir': run_dir_abs,
+                                         'heartbeat_topic': g('heartbeat_topic'),
+                                         'hazard_topic': g('hazard_topic'),
+                                         'min_sep_m': float(g('min_sep_m'))}]))
+    return actions
 
 
 def generate_launch_description():
-    args = [
-        DeclareLaunchArgument(
-            'num_drones', default_value='2',
-            description='PX4 instances 0..num_drones-1 must already be running '
-                        '(tools/start_px4_swarm.sh) with the SAME num_drones/'
-                        'y_min/y_max/model as this launch file'),
-        DeclareLaunchArgument('world', default_value='default'),
-        DeclareLaunchArgument(
-            'model', default_value='x500_mono_cam_down',
-            description="gz model name WITHOUT the 'gz_' airframe prefix"),
-        # --- total survey area, split along EAST (y) into num_drones bands ---
-        DeclareLaunchArgument('x_min', default_value='0.0'),
-        DeclareLaunchArgument('x_max', default_value='30.0'),
-        DeclareLaunchArgument('y_min', default_value='0.0'),
-        DeclareLaunchArgument(
-            'y_max', default_value='60.0',
-            description='enlarge this (or shrink num_drones) if drones finish '
-                        'together with nothing to divide - SWARM_PLAN.md section 4'),
-        DeclareLaunchArgument('altitude', default_value='10.0'),
-        DeclareLaunchArgument('lane_spacing', default_value='0.0'),
-        DeclareLaunchArgument('sidelap', default_value='0.3'),
-        DeclareLaunchArgument(
-            'yaw_mode', default_value='course',
-            description="course = face direction of travel; fixed = locked to "
-                        "fixed_yaw_deg; hold = don't command yaw at all"),
-        # Declared by survey_node.py but previously forwarded by no launch file,
-        # so they could not be set from the command line at all.
-        DeclareLaunchArgument('fixed_yaw_deg', default_value='0.0'),
-        DeclareLaunchArgument('yaw_deadzone_m', default_value='1.0'),
-        DeclareLaunchArgument('rtl_on_complete', default_value='true'),
-        DeclareLaunchArgument('lookahead_m', default_value='4.0'),
-        # --- detection (one shared detector for all drones) ---
-        DeclareLaunchArgument('weights', default_value='yolov8n.pt'),
-        DeclareLaunchArgument('conf', default_value='0.65'),
-        DeclareLaunchArgument('classes', default_value='person'),
-        DeclareLaunchArgument('imgsz', default_value='1280'),
-        DeclareLaunchArgument('pose_lag_s', default_value='0.25'),
-        DeclareLaunchArgument('max_alt_m', default_value='40.0'),
-        DeclareLaunchArgument('require_gate', default_value='true'),
-        # --- timing ---
-        DeclareLaunchArgument('survey_delay', default_value='8.0'),
+    _, onboard_args = _onboard_args()
+    decls = [DeclareLaunchArgument(k, default_value=v) for k, v in onboard_args.items()
+             if k not in ('drone_id', 'run_dir', 'start_delay_s', 'abort_after_lanes')]
+    decls += [
+        DeclareLaunchArgument('run_dir', default_value='',
+                              description="'' = new ~/maps/swarm_<stamp>/ per run"),
+        DeclareLaunchArgument('ground_station', default_value='true',
+                              description='passive monitor; the mission does not need it'),
+        DeclareLaunchArgument('start_delay', default_value='',
+                              description="TEST: ';'-separated seconds per drone"),
+        DeclareLaunchArgument('abort_after_lanes', default_value='',
+                              description="TEST: ';'-separated, -1 = fly the whole band"),
     ]
-    return LaunchDescription(args + [OpaqueFunction(function=_launch_setup)])
+    return LaunchDescription(decls + [OpaqueFunction(function=_setup)])

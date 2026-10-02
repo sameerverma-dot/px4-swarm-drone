@@ -31,16 +31,38 @@ RESOLVED (was a known follow-up): lane_spacing is no longer a hardcoded guess -
 lane_spacing:=0.0 derives it from the camera footprint,
 2*altitude*tan(HFOV/2)*(1-sidelap).
 
-MULTI-DRONE (SWARM): namespace:='' (default) is byte-for-byte the old
-single-drone behaviour - unnamespaced /fmu/... topics, PX4 instance 0.
-For a second/third vehicle, PX4's own instance>0 convention namespaces its
-DDS topics as /px4_<instance>/fmu/... (see PX4's rcS); pass the matching
-namespace:='/px4_1' etc. here so this node talks to THAT vehicle.
+MULTI-DRONE: namespace:='' (default) is PX4 instance 0, unnamespaced /fmu/...
+For instance i>0 PX4 namespaces its DDS topics /px4_<i>/fmu/... (PX4's rcS);
+pass the matching namespace:='/px4_1' etc.
 
-Area-splitting for a swarm needs no code change here: give each drone
-instance its own x_min/x_max/y_min/y_max (a band of the total survey area)
-and its own namespace/detect_topic/csv_prefix - see
-src/survey/launch/swarm_mission.launch.py, which computes the bands.
+--------------------------------------------------------------------------
+ONBOARD SWARM MODE (drone_id >= 0)
+--------------------------------------------------------------------------
+This node is the flight half of what runs on each drone's onboard computer.
+It needs nothing from a ground station: it computes its own band from
+(drone_id, num_drones, swarm_y_min, swarm_y_max), flies it, logs, and returns.
+Peers talk to each other directly over /swarm/heartbeat (swarm_msgs):
+
+  * heartbeat     ~4 Hz: id, shared-frame position, state, band/lane, lanes
+                  done, claimed band, ETA, battery.
+  * takeover      when its own band is done, a drone takes over a peer's
+                  unfinished lanes if the peer returned early, or went silent
+                  and its projected finish time has passed (a silent drone may
+                  still be flying - see swarm_logic.SwarmCoordinator). The
+                  nearest available drone claims; ties -> lower id.
+  * separation    if a peer comes inside sep_horizontal_m / sep_vertical_m the
+                  higher-id drone (or whoever is still in offboard, if the
+                  other is under PX4 RTL) holds position and moves vertically
+                  away until the peer is clear. On top of altitude separation:
+                  takeover transits fly a drone-specific layer above survey
+                  altitude, and PX4 RTL altitudes are staggered by the launcher.
+
+All decision logic lives in swarm_logic.py and is unit-tested there. With
+drone_id < 0 (default) none of this runs and the node behaves exactly as the
+single-drone survey always has.
+
+Fault-injection hooks for testing (off by default): start_delay_s,
+abort_after_lanes.
 """
 
 import csv
@@ -57,21 +79,30 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPo
 from std_msgs.msg import Bool
 
 from px4_msgs.msg import (
+    BatteryStatus,
     OffboardControlMode,
     TrajectorySetpoint,
     VehicleCommand,
     VehicleLocalPosition,
     VehicleStatus,
 )
+from swarm_msgs.msg import DroneHeartbeat
+
+from survey import swarm_logic as sl
 
 
 class Phase(Enum):
+    WAIT = -1         # swarm test hook: start_delay_s on the pad
     INIT = 0          # stream setpoints, then request offboard + arm
     ENGAGE = 1        # wait for offboard + armed confirmation
-    SURVEY = 2        # fly the lawnmower waypoints
+    SURVEY = 2        # fly self.wp (own band, then any takeover appended)
     RTL = 3           # command RTL, wait for it to engage
     RETURN_WAIT = 4   # wait until back near home
     DONE = 5          # verified, CSV written, shutting down
+    HOLD = 6          # swarm: own band done, hovering while a peer is undecided
+
+
+LANE_KINDS = ('lane_start', 'lane_end')
 
 
 class SurveyNode(Node):
@@ -128,6 +159,31 @@ class SurveyNode(Node):
         # instead of letting the nose twitch.
         self.declare_parameter('yaw_deadzone_m', 1.0)
 
+        # --- onboard swarm mode (see module docstring); drone_id < 0 = off ---
+        self.declare_parameter('drone_id', -1)
+        self.declare_parameter('num_drones', 1)
+        self.declare_parameter('swarm_y_min', 0.0)     # whole area, shared frame
+        self.declare_parameter('swarm_y_max', 60.0)
+        self.declare_parameter('heartbeat_topic', '/swarm/heartbeat')
+        self.declare_parameter('heartbeat_hz', 4.0)
+        self.declare_parameter('peer_timeout_s', 3.0)
+        self.declare_parameter('startup_grace_s', 45.0)
+        self.declare_parameter('deadline_margin_s', 15.0)
+        self.declare_parameter('claim_wait_s', 20.0)
+        self.declare_parameter('takeover', True)
+        self.declare_parameter('min_takeover_battery', 30.0)
+        self.declare_parameter('max_hold_s', 120.0)
+        self.declare_parameter('transit_alt_offset_m', 3.0)
+        self.declare_parameter('min_battery_pct', 20.0)   # below -> return early; <0 off
+        self.declare_parameter('separation', True)
+        self.declare_parameter('sep_horizontal_m', 8.0)
+        self.declare_parameter('sep_vertical_m', 5.0)
+        self.declare_parameter('sep_climb_m', 5.0)
+        self.declare_parameter('sep_clear_s', 2.0)
+        # --- fault injection, for testing the swarm behaviours ---
+        self.declare_parameter('start_delay_s', 0.0)
+        self.declare_parameter('abort_after_lanes', -1)
+
         g = self.get_parameter
         self.x_min = float(g('x_min').value)
         self.x_max = float(g('x_max').value)
@@ -158,6 +214,25 @@ class SurveyNode(Node):
         self.fixed_yaw = math.radians(float(g('fixed_yaw_deg').value))
         self.yaw_deadzone = float(g('yaw_deadzone_m').value)
 
+        self.me = int(g('drone_id').value)
+        self.swarm = self.me >= 0
+        self.num_drones = max(1, int(g('num_drones').value))
+        self.sy_min = float(g('swarm_y_min').value)
+        self.sy_max = float(g('swarm_y_max').value)
+        self.hb_period = 1.0 / max(0.5, float(g('heartbeat_hz').value))
+        self.peer_timeout = float(g('peer_timeout_s').value)
+        self.takeover_on = bool(g('takeover').value)
+        self.max_hold_s = float(g('max_hold_s').value)
+        self.transit_off = float(g('transit_alt_offset_m').value)
+        self.min_batt = float(g('min_battery_pct').value)
+        self.sep_on = bool(g('separation').value)
+        self.sep_h = float(g('sep_horizontal_m').value)
+        self.sep_v = float(g('sep_vertical_m').value)
+        self.sep_climb = float(g('sep_climb_m').value)
+        self.sep_clear_s = float(g('sep_clear_s').value)
+        self.start_delay = max(0.0, float(g('start_delay_s').value))
+        self.abort_after = int(g('abort_after_lanes').value)
+
         self.z = -abs(self.altitude)  # NED down: negative = up
 
         # Derive lane spacing from what the camera can actually see, rather than
@@ -178,6 +253,15 @@ class SurveyNode(Node):
                 f"footprint {self.footprint_w:.1f} m at {self.altitude:.1f} m "
                 f"altitude -> unphotographed gaps between lanes. "
                 f"Use lane_spacing:=0.0 to derive it.")
+
+        if self.swarm:
+            # Band geometry first: build_waypoints() below needs it.
+            n, me = self.num_drones, self.me
+            self.band_h = sl.band_height(n, self.sy_min, self.sy_max)
+            self.my_east0 = sl.band_origin_east(me, n, self.sy_min, self.sy_max)
+            # The survey box this drone actually flies, in its own local frame.
+            self.y_min, self.y_max = 0.0, self.band_h
+            self.lanes_y = sl.lane_offsets(self.band_h, self.lane_spacing)
 
         # ---- QoS: matches px4_ros_com examples (proven with this PX4/px4_msgs) ----
         qos = QoSProfile(
@@ -219,15 +303,16 @@ class SurveyNode(Node):
         self.pos_valid = False
         self.status = VehicleStatus()
         self.phase = Phase.INIT
-        self.done = False        # set by finish(); main() exits on it
+        self.done = False        # set when the node may exit; main() watches it
+        self.done_at = None      # swarm: keep heartbeating briefly after DONE
         self.counter = 0
         self.last_engage_t = 0.0
+        self.t0 = self.now_s()
+        self.phase_t0 = self.t0
         self.wp = self.build_waypoints()
         self.wp_idx = 0
         self.wp_min_dist = [float('inf')] * len(self.wp)
         self.track = []          # (t_s, x, y, z)
-        self.t0 = self.now_s()
-        self.phase_t0 = self.t0
         self.returned = False
         self.detecting = None            # last value published on detect_topic
         self.reached_alt = False         # latched once we first reach survey altitude
@@ -239,6 +324,9 @@ class SurveyNode(Node):
         # it has until an actual course exists. 'fixed' mode does not use this.
         self.cmd_yaw = float('nan')
 
+        if self.swarm:
+            self._init_swarm(qos)
+
         self.get_logger().info(
             f"Survey ns='{self.namespace or '(none)'}' x[{self.x_min},{self.x_max}] "
             f"y[{self.y_min},{self.y_max}] alt={self.altitude}m lane={self.lane_spacing}m "
@@ -247,6 +335,54 @@ class SurveyNode(Node):
         self.publish_detecting(False)
 
         self.timer = self.create_timer(0.1, self.tick)  # 10 Hz
+
+    # ---------- swarm setup ----------
+    def _init_swarm(self, px4_qos):
+        n, me = self.num_drones, self.me
+        self.coord = sl.SwarmCoordinator(
+            me, n, len(self.lanes_y),
+            peer_timeout_s=self.peer_timeout,
+            startup_grace_s=float(self.get_parameter('startup_grace_s').value),
+            deadline_margin_s=float(self.get_parameter('deadline_margin_s').value),
+            min_takeover_battery=float(self.get_parameter('min_takeover_battery').value),
+            claim_wait_s=float(self.get_parameter('claim_wait_s').value))
+        self.coord.start(self.now_s())
+
+        self.own_lanes_done = 0
+        self.mask = 0                    # bands this drone has fully covered
+        self.claim = None                # {'band', 'from', 'lanes_done'} while taking over
+        self.takeovers = []              # history for the VERIFY line
+        self.hold_t0 = None
+        self.hold_xy = None
+        self.hold_reason = ''
+        self.yielding = None             # {'peer','x','y','z','clear_since'}
+        self.gate_alt_ok = False
+        self.battery = -1.0
+        self.end_reason = ''
+        self.offboard_lost_t = None
+        self.peer_live = {}              # for SILENT / back log lines
+        self.peers_heard = set()
+        self.last_hb_t = 0.0
+        self.cruise = 0.95 * self.lookahead if self.lookahead > 0 else 8.0
+
+        ns = self.namespace
+        hb_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT,
+                            durability=DurabilityPolicy.VOLATILE,
+                            history=HistoryPolicy.KEEP_LAST, depth=10)
+        topic = str(self.get_parameter('heartbeat_topic').value)
+        self.pub_hb = self.create_publisher(DroneHeartbeat, topic, hb_qos)
+        self.create_subscription(DroneHeartbeat, topic, self.on_heartbeat, hb_qos)
+        for t in (f'{ns}/fmu/out/battery_status', f'{ns}/fmu/out/battery_status_v1'):
+            self.create_subscription(BatteryStatus, t, self.on_battery, px4_qos)
+        if self.start_delay > 0:
+            self.phase = Phase.WAIT
+        self.get_logger().info(
+            f"SWARM drone {me}/{n}: band {me} = shared east "
+            f"[{self.my_east0:.1f}, {self.my_east0 + self.band_h:.1f}], "
+            f"{len(self.lanes_y)} lanes; takeover={'on' if self.takeover_on else 'off'}, "
+            f"separation={'on' if self.sep_on else 'off'} ({self.sep_h:g} m / {self.sep_v:g} m)"
+            + (f"; TEST start_delay {self.start_delay:g} s" if self.start_delay else "")
+            + (f"; TEST abort after {self.abort_after} lane(s)" if self.abort_after >= 0 else ""))
 
     # ---------- time helpers ----------
     def now_s(self):
@@ -257,6 +393,16 @@ class SurveyNode(Node):
 
     # ---------- waypoint generation ----------
     def build_waypoints(self):
+        """Waypoints as dicts: x, y, z (local NED), kind, band, lane.
+
+        Single-drone: exactly the old pattern - climb at home, then lanes over
+        [y_min, y_max]. Swarm: the same pattern over this drone's own band."""
+        wps = [dict(x=0.0, y=0.0, z=self.z, kind='climb', band=-1, lane=-1)]
+        if self.swarm:
+            for x, y, k, end in sl.lane_waypoints(self.lanes_y, self.x_min, self.x_max):
+                wps.append(dict(x=x, y=y, z=self.z, kind='lane_end' if end else 'lane_start',
+                                band=self.me, lane=k))
+            return wps
         step = abs(self.lane_spacing) if self.lane_spacing else (self.y_max - self.y_min)
         step = step if step > 1e-6 else 1.0
         ys = []
@@ -265,26 +411,60 @@ class SurveyNode(Node):
             ys.append(y)
             y += step
         ys.append(self.y_max)  # always cover the far edge
-
-        wps = [(0.0, 0.0, self.z)]  # climb straight up at home first
         for i, yy in enumerate(ys):
-            if i % 2 == 0:
-                wps.append((self.x_min, yy, self.z))
-                wps.append((self.x_max, yy, self.z))
-            else:
-                wps.append((self.x_max, yy, self.z))
-                wps.append((self.x_min, yy, self.z))
+            a, b = (self.x_min, self.x_max) if i % 2 == 0 else (self.x_max, self.x_min)
+            wps.append(dict(x=a, y=yy, z=self.z, kind='lane_start', band=-1, lane=i))
+            wps.append(dict(x=b, y=yy, z=self.z, kind='lane_end', band=-1, lane=i))
+        return wps
+
+    def takeover_waypoints(self, band, from_lane):
+        """Lanes from_lane.. of `band`, in MY local frame, entered from the
+        nearer end, reached by a transit in this drone's own altitude layer."""
+        dy = sl.band_origin_east(band, self.num_drones, self.sy_min, self.sy_max) - self.my_east0
+        px, py = (self.pos.x, self.pos.y) if self.pos_valid else (0.0, 0.0)
+        best = None
+        for rev in (False, True):
+            lanes = sl.lane_waypoints(self.lanes_y, self.x_min, self.x_max, from_lane, rev)
+            d = math.hypot(lanes[0][0] - px, lanes[0][1] + dy - py)
+            if best is None or d < best[0]:
+                best = (d, lanes)
+        lanes = best[1]
+        z_transit = self.z - (self.transit_off + 1.0 * self.me)   # up = more negative
+        x0, y0 = lanes[0][0], lanes[0][1] + dy
+        wps = [dict(x=px, y=py, z=z_transit, kind='transit', band=band, lane=-1),
+               dict(x=x0, y=y0, z=z_transit, kind='transit', band=band, lane=-1)]
+        for x, y, k, end in lanes:
+            wps.append(dict(x=x, y=y + dy, z=self.z,
+                            kind='lane_end' if end else 'lane_start', band=band, lane=k))
         return wps
 
     # ---------- subscriptions ----------
     def on_pos(self, msg):
         self.pos = msg
         self.pos_valid = bool(msg.xy_valid and msg.z_valid)
-        if self.pos_valid and self.phase not in (Phase.INIT, Phase.DONE):
+        if self.pos_valid and self.phase not in (Phase.WAIT, Phase.INIT, Phase.DONE):
             self.track.append((self.now_s() - self.t0, msg.x, msg.y, msg.z))
 
     def on_status(self, msg):
         self.status = msg
+
+    def on_battery(self, msg):
+        if msg.remaining >= 0:
+            self.battery = 100.0 * float(msg.remaining)
+
+    def on_heartbeat(self, m):
+        if m.drone_id == self.me:
+            return
+        now = self.now_s()
+        if m.drone_id not in self.peers_heard:
+            self.peers_heard.add(m.drone_id)
+            self.get_logger().info(
+                f"peer {m.drone_id} heard: {sl.STATE_NAMES[m.state]}, "
+                f"lanes {m.own_lanes_done}/{m.own_lanes_total}")
+        self.coord.update(sl.PeerInfo(
+            m.drone_id, m.state, m.north, m.east, m.alt, m.own_lanes_done,
+            m.own_lanes_total, m.claimed_band, m.claimed_from_lane,
+            m.bands_done_mask, m.eta_s, m.battery_pct, now))
 
     @property
     def is_offboard(self):
@@ -423,54 +603,325 @@ class SurveyNode(Node):
     def home_dist(self):
         return math.hypot(self.pos.x, self.pos.y)
 
+    # ---------- swarm: heartbeat ----------
+    def hb_state(self):
+        p = self.phase
+        if p in (Phase.WAIT,):
+            return sl.BOOT
+        if p in (Phase.INIT, Phase.ENGAGE):
+            return sl.ENGAGING
+        if p in (Phase.RTL, Phase.RETURN_WAIT):
+            return sl.RETURNING
+        if p == Phase.DONE:
+            return sl.LANDED if self.returned else sl.FAILED
+        if self.yielding:
+            return sl.YIELD
+        if p == Phase.HOLD:
+            return sl.HOLD
+        return sl.TAKEOVER if self.claim else sl.SURVEY
+
+    def eta(self):
+        if self.phase not in (Phase.INIT, Phase.ENGAGE, Phase.SURVEY):
+            return 0.0
+        rest = [(w['x'], w['y']) for w in self.wp[self.wp_idx:]]
+        start = (self.pos.x, self.pos.y) if self.pos_valid else (0.0, 0.0)
+        return sl.path_eta(start, rest, self.cruise)
+
+    def publish_heartbeat(self):
+        m = DroneHeartbeat()
+        m.drone_id, m.num_drones = self.me, self.num_drones
+        m.stamp = self.get_clock().now().to_msg()
+        m.state = self.hb_state()
+        if self.pos_valid:
+            m.north, m.east, m.alt = (float(self.pos.x), float(self.pos.y + self.my_east0),
+                                      float(-self.pos.z))
+        else:
+            m.north, m.east, m.alt = 0.0, float(self.my_east0), 0.0
+        w = self.wp[self.wp_idx] if self.phase == Phase.SURVEY and self.wp_idx < len(self.wp) else None
+        m.band = int(w['band']) if w else -1
+        m.lane = int(w['lane']) if w else -1
+        m.own_lanes_done = self.own_lanes_done
+        m.own_lanes_total = len(self.lanes_y)
+        m.claimed_band = self.claim['band'] if self.claim else -1
+        m.claimed_from_lane = self.claim['from'] if self.claim else 0
+        m.bands_done_mask = self.mask
+        m.eta_s = float(self.eta())
+        m.battery_pct = float(self.battery)
+        self.pub_hb.publish(m)
+
+    def log_peer_changes(self, now):
+        for j in range(self.num_drones):
+            if j == self.me or j not in self.coord.peers:
+                continue
+            live = self.coord.live(j, now)
+            if self.peer_live.get(j, True) != live:
+                p = self.coord.peers[j]
+                if live:
+                    self.get_logger().info(f"peer {j} back on the air")
+                elif p.state in (sl.LANDED, sl.FAILED):
+                    self.get_logger().info(
+                        f"peer {j} off the air after {sl.STATE_NAMES[p.state]} "
+                        f"(lanes {p.own_lanes_done}/{p.own_lanes_total})")
+                else:
+                    self.get_logger().warn(
+                        f"peer {j} SILENT (last heard {now - p.rx_time:.1f} s ago: "
+                        f"{sl.STATE_NAMES[p.state]}, lanes {p.own_lanes_done}/"
+                        f"{p.own_lanes_total}, eta {p.eta_s:.0f} s)")
+            self.peer_live[j] = live
+
+    # ---------- swarm: separation ----------
+    def separation(self, now):
+        """-> True if this tick's setpoint has been taken over by a yield."""
+        if not (self.sep_on and self.pos_valid and self.is_armed
+                and self.phase in (Phase.SURVEY, Phase.HOLD)):
+            self.yielding = None
+            return False
+        me = (self.pos.x, self.pos.y + self.my_east0, -self.pos.z)
+        peers = [(j, p.state, p.north, p.east, p.alt, now - p.rx_time)
+                 for j, p in self.coord.peers.items()]
+        hit = sl.separation_conflict(self.me, me, peers, self.sep_h, self.sep_v,
+                                     max_age_s=1.5)
+        if hit and hit[3]:
+            if self.yielding is None:
+                alt = sl.yield_altitude(me[2], hit[4], self.sep_v, self.sep_climb)
+                self.yielding = dict(peer=hit[0], x=self.pos.x, y=self.pos.y, z=-alt,
+                                     clear_since=None)
+                self.publish_detecting(False)
+                self.get_logger().warn(
+                    f"SEPARATION: peer {hit[0]} at {hit[1]:.1f} m horizontal / "
+                    f"{hit[2]:.1f} m vertical -> yielding: hold position, go to "
+                    f"{alt:.1f} m")
+            else:
+                self.yielding['clear_since'] = None
+        elif self.yielding:
+            p = self.coord.peers.get(self.yielding['peer'])
+            gone = p is None or now - p.rx_time > self.peer_timeout
+            far = (not gone) and math.hypot(p.north - me[0], p.east - me[1]) >= 1.25 * self.sep_h
+            if gone or far:
+                if self.yielding['clear_since'] is None:
+                    self.yielding['clear_since'] = now
+                elif now - self.yielding['clear_since'] >= self.sep_clear_s:
+                    self.get_logger().info(
+                        f"SEPARATION: peer {self.yielding['peer']} clear"
+                        f"{' (silent)' if gone else ''} -> resuming")
+                    self.yielding = None
+                    return False
+            else:
+                self.yielding['clear_since'] = None
+        if self.yielding:
+            y = self.yielding
+            self.send_sp(y['x'], y['y'], y['z'], float('nan'))
+            return True
+        return False
+
+    # ---------- swarm: what next, once the current work is done ----------
+    def next_work(self, now):
+        if not self.takeover_on:
+            return self.start_rtl('mission complete')
+        if 0 <= self.battery < self.coord.min_batt:
+            return self.start_rtl(f'battery {self.battery:.0f}% too low to help peers')
+        for band, frm in self.coord.orphans(now, self.mask):
+            if self.coord.should_claim(band, now, self.battery):
+                return self.claim_band(band, frm, now)
+        orphans = self.coord.orphans(now, self.mask)
+        pending = self.coord.pending(now, self.mask)
+        if orphans or pending:
+            key = (tuple(b for b, _ in orphans), tuple(b for b, _ in pending))
+            if self.hold_t0 is None:
+                self.hold_t0 = now
+                self.hold_xy = (self.pos.x, self.pos.y) if self.pos_valid else (0.0, 0.0)
+            if key != self.hold_reason:      # log on change, not every tick
+                why = ', '.join([f"band {b} unfinished (better-placed peer should take it)"
+                                 for b, _ in orphans] +
+                                [f"band {b}: owner silent, may still be flying it - "
+                                 f"not entering for another {max((t or now) - now, 0):.0f} s"
+                                 for b, t in pending])
+                self.get_logger().info(f"HOLD: {why}")
+                self.hold_reason = key
+            if now - self.hold_t0 > self.max_hold_s:
+                return self.start_rtl(f'held {self.max_hold_s:.0f} s, nothing to take over')
+            self.phase = Phase.HOLD
+            return
+        self.start_rtl('mission complete')
+
+    def claim_band(self, band, frm, now):
+        owner = self.coord.peers.get(band)
+        why = ('never heard' if owner is None else
+               'returned early' if owner.state in sl.FINISHED_STATES else 'silent past its ETA')
+        new = self.takeover_waypoints(band, frm)
+        self.wp = self.wp[:self.wp_idx] + new
+        self.wp_min_dist = self.wp_min_dist[:self.wp_idx] + [float('inf')] * len(new)
+        self.claim = {'band': band, 'from': frm}
+        self.takeovers.append(f"band {band} lanes {frm}-{len(self.lanes_y) - 1}")
+        self.hold_t0, self.hold_reason = None, ''
+        self.phase = Phase.SURVEY
+        self.get_logger().warn(
+            f"TAKEOVER: band {band} lanes {frm}..{len(self.lanes_y) - 1} "
+            f"(drone {band} {why})")
+
+    def start_rtl(self, reason):
+        self.end_reason = reason
+        self.publish_detecting(False)
+        self.yielding = None
+        if not self.rtl_on_complete and reason == 'mission complete':
+            return self.finish(True, reason='complete (no RTL)')
+        self.get_logger().info(f"RTL: {reason}")
+        self.engage_rtl()
+        self.last_engage_t = self.now_s()
+        self.phase = Phase.RTL
+        self.phase_t0 = self.now_s()
+
+    def swarm_checks(self, now):
+        """Early-return triggers while flying. -> True if one fired."""
+        if self.phase not in (Phase.SURVEY, Phase.HOLD):
+            return False
+        # PX4 took the vehicle (battery failsafe, geofence, ...): stop steering.
+        if self.is_armed and not self.is_offboard:
+            self.offboard_lost_t = self.offboard_lost_t or now
+            if now - self.offboard_lost_t > 2.0:
+                self.end_reason = f'PX4 took control (nav_state {self.status.nav_state})'
+                self.get_logger().warn(f"EARLY RETURN: {self.end_reason}")
+                self.publish_detecting(False)
+                self.yielding = None
+                self.phase, self.phase_t0 = Phase.RETURN_WAIT, now
+                return True
+        else:
+            self.offboard_lost_t = None
+        if self.min_batt >= 0 and 0 <= self.battery < self.min_batt:
+            self.get_logger().warn(f"EARLY RETURN: battery {self.battery:.0f}%")
+            self.start_rtl(f'battery {self.battery:.0f}% < {self.min_batt:.0f}%')
+            return True
+        if self.claim is None and self.phase == Phase.SURVEY:
+            # A peer decided I was gone and claimed my band - two drones must not
+            # share it, and the claimer is already committed.
+            for j, p in self.coord.peers.items():
+                if p.claimed_band == self.me and self.coord.live(j, now):
+                    self.get_logger().warn(f"EARLY RETURN: peer {j} claimed my band")
+                    self.start_rtl(f'peer {j} claimed my band')
+                    return True
+        if self.claim and self.coord.claim_conflict(self.claim['band'], now):
+            self.get_logger().warn(
+                f"TAKEOVER released: a better-placed peer also claimed band "
+                f"{self.claim['band']}")
+            self.wp = self.wp[:self.wp_idx]
+            self.wp_min_dist = self.wp_min_dist[:self.wp_idx]
+            self.takeovers[-1] += ' (released)'
+            self.claim = None
+            self.next_work(now)
+            return True
+        return False
+
+    def gate_open(self, w):
+        """Swarm gate: on a lane, near survey altitude (with hysteresis), not
+        yielding. Covers own lanes and takeover lanes; closed in transit."""
+        if not self.pos_valid or self.yielding or w['kind'] not in LANE_KINDS:
+            self.gate_alt_ok = False
+            return False
+        err = abs(-self.pos.z - self.altitude)
+        self.gate_alt_ok = err < (2.0 if self.gate_alt_ok else 1.0)
+        return self.gate_alt_ok
+
+    def on_waypoint_reached(self, w):
+        if w['kind'] != 'lane_end':
+            return
+        if w['band'] == self.me and self.claim is None:
+            self.own_lanes_done = w['lane'] + 1
+            self.get_logger().info(
+                f"own lane {w['lane']} done ({self.own_lanes_done}/{len(self.lanes_y)})")
+        elif self.claim and w['band'] == self.claim['band']:
+            self.get_logger().info(f"takeover: band {w['band']} lane {w['lane']} done")
+
+    def on_work_complete(self, now):
+        if self.claim:
+            self.mask |= 1 << self.claim['band']
+            self.get_logger().info(f"TAKEOVER complete: band {self.claim['band']}")
+            self.claim = None
+        else:
+            self.mask |= 1 << self.me
+            self.get_logger().info("own band complete")
+        self.next_work(now)
+
     # ---------- main loop ----------
     def tick(self):
+        now = self.now_s()
+        if self.swarm:
+            if now - self.last_hb_t >= self.hb_period:
+                self.last_hb_t = now
+                self.publish_heartbeat()
+                self.log_peer_changes(now)
+            if self.phase == Phase.DONE:
+                if self.done_at is not None and now >= self.done_at:
+                    self.done = True
+                return
+
+        if self.phase == Phase.WAIT:
+            if now - self.t0 >= self.start_delay:
+                self.get_logger().info(f"start delay {self.start_delay:g} s over")
+                self.phase = Phase.INIT
+            return
+
         # Stream the offboard heartbeat whenever we intend to stay in offboard.
-        if self.phase in (Phase.INIT, Phase.ENGAGE, Phase.SURVEY):
+        if self.phase in (Phase.INIT, Phase.ENGAGE, Phase.SURVEY, Phase.HOLD):
             self.send_ocm()
 
         if self.phase == Phase.INIT:
             # Straight up at home: no horizontal course exists, so don't
             # command a heading - NaN leaves the drone's yaw alone.
-            self.send_sp(*self.wp[0], yaw=self.climb_yaw())
+            w = self.wp[0]
+            self.send_sp(w['x'], w['y'], w['z'], yaw=self.climb_yaw())
             self.counter += 1
             if self.counter >= 10:      # ~1 s of setpoints before switching
                 self.engage_offboard()
                 self.arm()
-                self.last_engage_t = self.now_s()
+                self.last_engage_t = now
                 self.phase = Phase.ENGAGE
-                self.phase_t0 = self.now_s()
+                self.phase_t0 = now
             return
 
         if self.phase == Phase.ENGAGE:
-            self.send_sp(*self.wp[0], yaw=self.climb_yaw())
+            w = self.wp[0]
+            self.send_sp(w['x'], w['y'], w['z'], yaw=self.climb_yaw())
             if self.is_offboard and self.is_armed:
                 self.get_logger().info("Offboard engaged + armed -> starting survey")
                 self.phase = Phase.SURVEY
-                self.phase_t0 = self.now_s()
-            elif self.now_s() - self.phase_t0 > self.arm_timeout_s:
+                self.phase_t0 = now
+            elif now - self.phase_t0 > self.arm_timeout_s:
                 self.get_logger().error("offboard/arm not achieved within timeout")
                 self.finish(False, reason="arm/offboard timeout")
-            elif self.now_s() - self.last_engage_t > 1.0:
+            elif now - self.last_engage_t > 1.0:
                 self.engage_offboard()
                 self.arm()
-                self.last_engage_t = self.now_s()
+                self.last_engage_t = now
+            return
+
+        if self.swarm and (self.swarm_checks(now) or self.separation(now)):
+            return
+
+        if self.phase == Phase.HOLD:
+            x, y = self.hold_xy
+            self.send_sp(x, y, self.z, float('nan'))
+            self.publish_detecting(False)
+            self.next_work(now)
             return
 
         if self.phase == Phase.SURVEY:
-            tx, ty, tz = self.wp[self.wp_idx]
+            w = self.wp[self.wp_idx]
+            tx, ty, tz = w['x'], w['y'], w['z']
             # Bearing is taken to the TRUE waypoint, never to the carrot: the
             # carrot converges onto the drone near arrival, where the bearing
             # between them is numerically unstable and can flip 180 degrees.
             self.send_sp_limited(tx, ty, tz, self.desired_yaw(tx, ty))
-            # wp[0] is the climb straight up at home - nothing under us to map,
-            # and the projection is garbage while altitude is still changing.
-            # reached_alt is LATCHED: without it the gate chatters open/closed
-            # every time the drone dips slightly during a lane turn, spamming
-            # the log and republishing on every tick.
-            if self.pos_valid and -self.pos.z >= 0.8 * self.altitude:
-                self.reached_alt = True
-            self.publish_detecting(self.wp_idx >= 1 and self.reached_alt)
+            if self.swarm:
+                self.publish_detecting(self.gate_open(w))
+            else:
+                # wp[0] is the climb straight up at home - nothing under us to
+                # map, and the projection is garbage while altitude is still
+                # changing. reached_alt is LATCHED: without it the gate chatters
+                # open/closed every time the drone dips slightly during a lane
+                # turn, spamming the log and republishing on every tick.
+                if self.pos_valid and -self.pos.z >= 0.8 * self.altitude:
+                    self.reached_alt = True
+                self.publish_detecting(self.wp_idx >= 1 and self.reached_alt)
             if self.pos_valid:
                 d = self.dist_to(tx, ty, tz)
                 self.wp_min_dist[self.wp_idx] = min(self.wp_min_dist[self.wp_idx], d)
@@ -479,16 +930,27 @@ class SurveyNode(Node):
                         f"reached wp {self.wp_idx + 1}/{len(self.wp)} "
                         f"({tx:.1f},{ty:.1f},{tz:.1f}) d={d:.2f}m")
                     self.wp_idx += 1
+                    if self.swarm:
+                        self.on_waypoint_reached(w)
+                        if (self.claim is None and 0 <= self.abort_after
+                                and self.own_lanes_done == self.abort_after
+                                and self.own_lanes_done < len(self.lanes_y)):
+                            self.get_logger().warn(
+                                f"EARLY RETURN: TEST hook abort_after_lanes={self.abort_after}")
+                            return self.start_rtl(
+                                f'test: abort after {self.abort_after} lane(s)')
                     if self.wp_idx >= len(self.wp):
                         self.get_logger().info("survey pattern complete")
                         # Close the gate BEFORE RTL: the climb to RTL altitude was
                         # what produced the alt-29.7 m junk in hazard_points.csv.
                         self.publish_detecting(False)
+                        if self.swarm:
+                            return self.on_work_complete(now)
                         if self.rtl_on_complete:
                             self.engage_rtl()
-                            self.last_engage_t = self.now_s()
+                            self.last_engage_t = now
                             self.phase = Phase.RTL
-                            self.phase_t0 = self.now_s()
+                            self.phase_t0 = now
                         else:
                             self.finish(self.check_waypoints(), reason="complete (no RTL)")
             return
@@ -498,10 +960,10 @@ class SurveyNode(Node):
             if self.status.nav_state == VehicleStatus.NAVIGATION_STATE_AUTO_RTL:
                 self.get_logger().info("RTL engaged -> waiting for return")
                 self.phase = Phase.RETURN_WAIT
-                self.phase_t0 = self.now_s()
-            elif self.now_s() - self.last_engage_t > 1.0:
+                self.phase_t0 = now
+            elif now - self.last_engage_t > 1.0:
                 self.engage_rtl()
-                self.last_engage_t = self.now_s()
+                self.last_engage_t = now
             return
 
         if self.phase == Phase.RETURN_WAIT:
@@ -509,7 +971,7 @@ class SurveyNode(Node):
                 self.returned = True
                 self.get_logger().info(f"returned home (d={self.home_dist():.2f} m)")
                 self.finish(self.check_waypoints() and self.returned, reason="returned")
-            elif self.now_s() - self.phase_t0 > self.return_timeout_s:
+            elif now - self.phase_t0 > self.return_timeout_s:
                 self.get_logger().warn("return timed out")
                 self.finish(False, reason="return timeout")
             return
@@ -539,11 +1001,30 @@ class SurveyNode(Node):
         self.phase = Phase.DONE
         self.publish_detecting(False)
         csv_path = self.write_csv() if self.verify else None
-        hit = sum(1 for d in self.wp_min_dist if d <= self.reach_tol)
+        # Only waypoints actually attempted count: after an early return the
+        # rest of the band is a peer's job, not a MISS.
+        flown = self.wp_min_dist[:max(self.wp_idx, 1)] if self.swarm else self.wp_min_dist
+        hit = sum(1 for d in flown if d <= self.reach_tol)
         for i, (wp, d) in enumerate(zip(self.wp, self.wp_min_dist)):
+            if self.swarm and i >= self.wp_idx:
+                break
             self.get_logger().info(
-                f"  wp{i + 1} ({wp[0]:.1f},{wp[1]:.1f},{wp[2]:.1f}) "
+                f"  wp{i + 1} ({wp['x']:.1f},{wp['y']:.1f},{wp['z']:.1f}) "
                 f"closest={d:.2f}m {'OK' if d <= self.reach_tol else 'MISS'}")
+        if self.swarm:
+            total = len(self.lanes_y)
+            complete = self.mask >> self.me & 1
+            verdict = ('FAIL' if not self.returned else
+                       'PASS' if complete and hit == len(flown) else 'PARTIAL')
+            self.get_logger().info(
+                f"VERIFY {verdict} | drone {self.me} | own lanes {self.own_lanes_done}/{total} "
+                f"| took over: {', '.join(self.takeovers) or 'none'} | waypoints {hit}/"
+                f"{len(flown)} | returned={self.returned} | why={self.end_reason or reason} "
+                f"| csv={csv_path or 'n/a'}")
+            # Keep heartbeating LANDED/FAILED for a moment so peers record the
+            # final state instead of just seeing the drone go quiet.
+            self.done_at = self.now_s() + 2.0
+            return
         wp_ok = self.check_waypoints()
         verdict = 'PASS' if passed else 'FAIL'
         self.get_logger().info(
