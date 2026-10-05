@@ -1,0 +1,50 @@
+{
+  "report": {
+    "mission_id": "swarm_20261002_180220",
+    "n_drones": 3,
+    "area_covered_m2": 2700.0,
+    "targets_found": 11,
+    "targets_truth": 11,
+    "false_positives": 0,
+    "duplicates": 0,
+    "geotag_error_m": {
+      "min": 0.09,
+      "max": 0.29,
+      "mean": 0.18
+    },
+    "takeover_events": [],
+    "anomalies": [],
+    "summary": "Mock narrative: run with a live provider for a written summary."
+  },
+  "meta": {
+    "provider": "mock",
+    "model": "mock",
+    "evidence_ids": [
+      "survey_node_0:L72",
+      "survey_node_1:L72",
+      "survey_node_2:L72",
+      "survey_node_0:L2",
+      "detector_node_0:L47",
+      "sightings_d0:below",
+      "sightings_d1:below",
+      "sightings_d2:below",
+      "survey_node_0:L51",
+      "ground_station:L159",
+      "ground_station:L152",
+      "ground_station:L7",
+      "ground_station:L12",
+      "ground_station:L22",
+      "ground_station:L23",
+      "ground_station:L29",
+      "ground_station:L40",
+      "survey_node_1:L2",
+      "survey_node_2:L2"
+    ],
+    "narrative_valid": true,
+    "unsupported_numbers": [],
+    "attempts": 1,
+    "error": null,
+    "latency_s": 0.0,
+    "citations": []
+  }
+}
