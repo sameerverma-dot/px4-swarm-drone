@@ -193,16 +193,37 @@ def run_eval(mission: str, provider: Provider | str | None = None,
     by_id = analyst.index.by_id
     corpus_ids = set(by_id)
     qs = build_eval_set(facts, records)[:limit] if limit else build_eval_set(facts, records)
+    out_dir = Path(out_dir or config.RESULTS_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Checkpoint: rows already scored by an interrupted run with the same setup are reused.
+    ckpt = out_dir / f".eval_progress_{provider.name}.json"
+    setup = {"mission": mission, "model": provider.model, "judge_model": jprov.model, "top_k": top_k}
+    done: dict[str, dict] = {}
+    if ckpt.exists():
+        saved = json.loads(ckpt.read_text())
+        if saved.get("setup") == setup:
+            done = {r["id"]: r for r in saved["rows"]}
+            print(f"  resuming: {len(done)} answer(s) reused from an interrupted run", flush=True)
     rows = []
     t_start = time.monotonic()
     for q in qs:
+        prev = done.get(q.id)
+        if prev and prev["question"] == q.question:
+            rows.append(prev)
+            print(f"  [{len(rows)}/{len(qs)}] {q.id:<18} {'PASS' if prev['correct'] else 'FAIL'} (reused)")
+            continue
         ans = analyst.ask(q.question, top_k=top_k)
         if ans.error and not ans.raw:
-            # No reply at all: the provider itself failed (bad key, unknown model, quota).
-            # Stop instead of scoring every question as wrong and writing a 0% table.
-            raise SystemExit(f"eval aborted at {q.id}: provider error, nothing written.\n  {ans.error}")
-        rows.append(score_question(q, ans, jprov, corpus_ids, by_id))
-        r = rows[-1]
+            # No reply at all: the provider itself failed (bad key, unknown model, overload).
+            # Stop instead of scoring the question as wrong; finished rows are checkpointed.
+            raise SystemExit(f"eval aborted at {q.id}: provider error. {len(rows)} finished answer(s) "
+                             f"saved; rerun the same command to resume.\n  {ans.error}")
+        r = score_question(q, ans, jprov, corpus_ids, by_id)
+        if (r["judge_reason"] or "").startswith("judge error"):
+            raise SystemExit(f"eval aborted at {q.id}: judge provider error. {len(rows)} finished "
+                             f"answer(s) saved; rerun to resume.\n  {r['judge_reason']}")
+        rows.append(r)
+        ckpt.write_text(json.dumps({"setup": setup, "rows": rows}, default=str))
         why = ""
         if not r["correct"]:
             why = f"  <- {r['qa_error'] or r['judge_reason'] or r['answer']}"[:160]
@@ -214,11 +235,10 @@ def run_eval(mission: str, provider: Provider | str | None = None,
            "summary": summarise(rows),
            "questions": [q.to_dict() for q in qs],
            "results": rows}
-    out_dir = Path(out_dir or config.RESULTS_DIR)
-    out_dir.mkdir(parents=True, exist_ok=True)
     suffix = "" if provider.name != "mock" else "_mock"
     jp, tp = out_dir / f"eval_results{suffix}.json", out_dir / f"eval_table{suffix}.md"
     jp.write_text(json.dumps(out, indent=2, default=str))
     tp.write_text(render_table(out))
     out["json_path"], out["table_path"] = str(jp), str(tp)
+    ckpt.unlink(missing_ok=True)
     return out

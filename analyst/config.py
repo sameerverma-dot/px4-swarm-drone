@@ -18,7 +18,10 @@ MODELS = {
 API_KEY_ENV = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
 # Free tiers rate-limit per minute; space live calls out (seconds).
 MIN_CALL_INTERVAL_S = float(os.environ.get("ANALYST_MIN_CALL_INTERVAL_S", "4.5"))
-MAX_RETRIES = 4
+# Overload (503) and rate-limit (429) spikes can last minutes: back off
+# RETRY_BASE_S * 2^n seconds, capped at 60 s, for up to MAX_RETRIES attempts.
+MAX_RETRIES = int(os.environ.get("ANALYST_MAX_RETRIES", "8"))
+RETRY_BASE_S = float(os.environ.get("ANALYST_RETRY_BASE_S", "5"))
 
 TOP_K = int(os.environ.get("ANALYST_TOP_K", "8"))
 
