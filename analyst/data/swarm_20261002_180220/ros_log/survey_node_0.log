@@ -1,0 +1,72 @@
+[INFO] [1790944349.387319249] [survey_node_0]: lane_spacing derived: detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude, 20% sidelap -> 3.99 m
+[INFO] [1790944349.400390335] [survey_node_0]: SWARM drone 0/3: band 0 = shared east [0.0, 30.0], 8 lanes; takeover=on, separation=on (8 m / 5 m)
+[INFO] [1790944349.400725665] [survey_node_0]: Survey ns='(none)' x[0.0,30.0] y[0.0,30.0] alt=10.0m lane=3.989248045490891m -> 17 waypoints; RTL=on, verify=True, lookahead=4.0m, yaw=course
+[INFO] [1790944349.401035902] [survey_node_0]: detection gate -> closed
+[INFO] [1790944349.503340679] [survey_node_0]: peer 2 heard: ENGAGING, lanes 0/8
+[INFO] [1790944349.505378866] [survey_node_0]: peer 1 heard: ENGAGING, lanes 0/8
+[INFO] [1790944350.502100192] [survey_node_0]: Offboard engaged + armed -> starting survey
+[INFO] [1790944357.502444537] [survey_node_0]: reached wp 1/17 (0.0,0.0,-10.0) d=1.43m
+[INFO] [1790944359.603229238] [survey_node_0]: reached wp 2/17 (-6.0,1.9,-10.0) d=1.38m
+[INFO] [1790944362.102934606] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944370.302712099] [survey_node_0]: detection gate -> closed
+[INFO] [1790944371.603205927] [survey_node_0]: reached wp 3/17 (36.0,1.9,-10.0) d=1.35m
+[INFO] [1790944371.604192808] [survey_node_0]: own lane 0 done (1/8)
+[INFO] [1790944373.002593592] [survey_node_0]: reached wp 4/17 (36.0,5.6,-10.0) d=1.42m
+[INFO] [1790944375.402000469] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944383.402406502] [survey_node_0]: detection gate -> closed
+[INFO] [1790944384.603220826] [survey_node_0]: reached wp 5/17 (-6.0,5.6,-10.0) d=1.48m
+[INFO] [1790944384.604072114] [survey_node_0]: own lane 1 done (2/8)
+[INFO] [1790944386.002868742] [survey_node_0]: reached wp 6/17 (-6.0,9.4,-10.0) d=1.39m
+[INFO] [1790944388.302532920] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944396.303977747] [survey_node_0]: detection gate -> closed
+[INFO] [1790944397.503533215] [survey_node_0]: reached wp 7/17 (36.0,9.4,-10.0) d=1.39m
+[INFO] [1790944397.504396379] [survey_node_0]: own lane 2 done (3/8)
+[INFO] [1790944398.902102447] [survey_node_0]: reached wp 8/17 (36.0,13.1,-10.0) d=1.37m
+[INFO] [1790944401.202177624] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944409.103717223] [survey_node_0]: detection gate -> closed
+[INFO] [1790944410.402933276] [survey_node_0]: reached wp 9/17 (-6.0,13.1,-10.0) d=1.30m
+[INFO] [1790944410.403308956] [survey_node_0]: own lane 3 done (4/8)
+[INFO] [1790944411.802762046] [survey_node_0]: reached wp 10/17 (-6.0,16.9,-10.0) d=1.37m
+[INFO] [1790944414.102982705] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944422.103009908] [survey_node_0]: detection gate -> closed
+[INFO] [1790944423.303111730] [survey_node_0]: reached wp 11/17 (36.0,16.9,-10.0) d=1.36m
+[INFO] [1790944423.303711782] [survey_node_0]: own lane 4 done (5/8)
+[INFO] [1790944424.702790830] [survey_node_0]: reached wp 12/17 (36.0,20.6,-10.0) d=1.42m
+[INFO] [1790944427.102233246] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944435.102574461] [survey_node_0]: detection gate -> closed
+[INFO] [1790944436.302702817] [survey_node_0]: reached wp 13/17 (-6.0,20.6,-10.0) d=1.46m
+[INFO] [1790944436.303563120] [survey_node_0]: own lane 5 done (6/8)
+[INFO] [1790944437.703414042] [survey_node_0]: reached wp 14/17 (-6.0,24.4,-10.0) d=1.40m
+[INFO] [1790944440.003017259] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944447.902433617] [survey_node_0]: detection gate -> closed
+[INFO] [1790944449.202629552] [survey_node_0]: reached wp 15/17 (36.0,24.4,-10.0) d=1.31m
+[INFO] [1790944449.203380771] [survey_node_0]: own lane 6 done (7/8)
+[INFO] [1790944450.602759794] [survey_node_0]: reached wp 16/17 (36.0,28.1,-10.0) d=1.43m
+[INFO] [1790944453.002788193] [survey_node_0]: detection gate -> OPEN
+[INFO] [1790944461.002444841] [survey_node_0]: detection gate -> closed
+[INFO] [1790944462.202392454] [survey_node_0]: reached wp 17/17 (-6.0,28.1,-10.0) d=1.38m
+[INFO] [1790944462.202968457] [survey_node_0]: own lane 7 done (8/8)
+[INFO] [1790944462.203487851] [survey_node_0]: survey pattern complete
+[INFO] [1790944462.203991386] [survey_node_0]: own band complete
+[INFO] [1790944462.204544370] [survey_node_0]: RTL: mission complete
+[INFO] [1790944462.302926297] [survey_node_0]: RTL engaged -> waiting for return
+[INFO] [1790944479.402698365] [survey_node_0]: returned home (d=2.93 m)
+[INFO] [1790944479.416531177] [survey_node_0]: track CSV written: /home/sam/maps/swarm_20261002_180220/survey_track_d0_1790944479.csv (6450 samples)
+[INFO] [1790944479.416980154] [survey_node_0]:   wp1 (0.0,0.0,-10.0) closest=1.43m OK
+[INFO] [1790944479.417356149] [survey_node_0]:   wp2 (-6.0,1.9,-10.0) closest=1.38m OK
+[INFO] [1790944479.417712354] [survey_node_0]:   wp3 (36.0,1.9,-10.0) closest=1.35m OK
+[INFO] [1790944479.418063119] [survey_node_0]:   wp4 (36.0,5.6,-10.0) closest=1.42m OK
+[INFO] [1790944479.418514080] [survey_node_0]:   wp5 (-6.0,5.6,-10.0) closest=1.48m OK
+[INFO] [1790944479.418860616] [survey_node_0]:   wp6 (-6.0,9.4,-10.0) closest=1.39m OK
+[INFO] [1790944479.419203843] [survey_node_0]:   wp7 (36.0,9.4,-10.0) closest=1.39m OK
+[INFO] [1790944479.419528374] [survey_node_0]:   wp8 (36.0,13.1,-10.0) closest=1.37m OK
+[INFO] [1790944479.419854343] [survey_node_0]:   wp9 (-6.0,13.1,-10.0) closest=1.30m OK
+[INFO] [1790944479.420205780] [survey_node_0]:   wp10 (-6.0,16.9,-10.0) closest=1.37m OK
+[INFO] [1790944479.420555181] [survey_node_0]:   wp11 (36.0,16.9,-10.0) closest=1.36m OK
+[INFO] [1790944479.420898276] [survey_node_0]:   wp12 (36.0,20.6,-10.0) closest=1.42m OK
+[INFO] [1790944479.421423073] [survey_node_0]:   wp13 (-6.0,20.6,-10.0) closest=1.46m OK
+[INFO] [1790944479.421916863] [survey_node_0]:   wp14 (-6.0,24.4,-10.0) closest=1.40m OK
+[INFO] [1790944479.422319648] [survey_node_0]:   wp15 (36.0,24.4,-10.0) closest=1.31m OK
+[INFO] [1790944479.422586829] [survey_node_0]:   wp16 (36.0,28.1,-10.0) closest=1.43m OK
+[INFO] [1790944479.422866000] [survey_node_0]:   wp17 (-6.0,28.1,-10.0) closest=1.38m OK
+[INFO] [1790944479.423182331] [survey_node_0]: VERIFY PASS | drone 0 | own lanes 8/8 | took over: none | waypoints 17/17 | returned=True | why=mission complete | csv=/home/sam/maps/swarm_20261002_180220/survey_track_d0_1790944479.csv

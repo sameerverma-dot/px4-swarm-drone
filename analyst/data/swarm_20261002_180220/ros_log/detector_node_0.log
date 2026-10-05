@@ -1,0 +1,50 @@
+[INFO] [1790944343.382342002] [detector_node_0]: torch 2.13.0+cu130 | CUDA available: True | GPU: NVIDIA GeForce RTX 4060 Laptop GPU
+[INFO] [1790944343.383416509] [detector_node_0]: loading YOLO weights: yolov8n.pt
+[INFO] [1790944343.827290499] [detector_node_0]: inference device=cuda:0 imgsz=1280 fp16=True
+[INFO] [1790944345.699374115] [detector_node_0]: model warm-up 1.9 s
+[INFO] [1790944345.700012014] [detector_node_0]: class filter active: ['person'] -> ids [0]
+[INFO] [1790944345.711981599] [detector_node_0]: shared hazard list on '/swarm/hazards' as drone 0
+[INFO] [1790944345.712302123] [detector_node_0]: detector up: drone 0 image='/world/default/model/x500_mono_cam_down_0/link/camera_link/sensor/camera/image' -> annotated='/detection/image_annotated_0', hazards -> /home/sam/maps/swarm_20261002_180220/hazards_d0.csv
+[INFO] [1790944345.712621739] [detector_node_0]: require_gate=True | pose_lag=0.25s | alt window [1.0, 40.0] m | imgsz=1280
+[INFO] [1790944349.402556017] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944362.110936382] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944362.809894384] [detector_node_0]: HAZARD d0-1: person conf=0.68 at N=6.4 E=7.4 (alt 10.0m, drone 0) - swarm list now 1
+[INFO] [1790944363.203759303] [detector_node_0]: peer hazard d2-1 at N=8.6 E=70.0: added to swarm list
+[INFO] [1790944365.715174058] [detector_node_0]: drone 0 [OPEN] camera 9.2 fps, inferred 6.0 fps, pose 50 Hz, best person 0.68 (below-threshold best 0.64), hits 1 | ms/frame: total 51, yolo 33 (pre 5 / gpu 21 / post 6) | delay ms median/max: pose 2/14, att -2/12, img+ 8/19
+[INFO] [1790944366.568966685] [detector_node_0]: peer hazard d1-1 at N=22.3 E=29.8: added to swarm list
+[INFO] [1790944370.304679206] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944375.403909490] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944375.715304896] [detector_node_0]: drone 0 [OPEN] camera 12.2 fps, inferred 0.6 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.00), hits 0 | ms/frame: total 34, yolo 16 (pre 3 / gpu 8 / post 4) | delay ms median/max: pose 2/14, att -2/11, img+ 9/20
+[INFO] [1790944377.665013082] [detector_node_0]: peer hazard d1-2 at N=14.7 E=36.4: added to swarm list
+[INFO] [1790944380.715679863] [detector_node_0]: drone 0 [OPEN] camera 8.6 fps, inferred 8.8 fps, pose 50 Hz, best person 0.81 (below-threshold best 0.49), hits 0 | ms/frame: total 35, yolo 17 (pre 5 / gpu 7 / post 4) | delay ms median/max: pose 2/15, att -2/11, img+ 8/19
+[INFO] [1790944383.404273261] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944388.308565594] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944389.537303241] [detector_node_0]: HAZARD d0-2: person conf=0.86 at N=11.0 E=9.7 (alt 10.0m, drone 0) - swarm list now 5
+[INFO] [1790944390.671168823] [detector_node_0]: peer hazard d1-3 at N=15.3 E=38.2: added to swarm list
+[INFO] [1790944390.715239503] [detector_node_0]: drone 0 [OPEN] camera 10.4 fps, inferred 4.8 fps, pose 50 Hz, best person 0.90 (below-threshold best 0.64), hits 1 | ms/frame: total 36, yolo 18 (pre 5 / gpu 8 / post 5) | delay ms median/max: pose 2/14, att -2/11, img+ 9/19
+[INFO] [1790944391.059891443] [detector_node_0]: HAZARD d0-3: person conf=0.87 at N=16.2 E=12.0 (alt 10.0m, drone 0) - swarm list now 7
+[INFO] [1790944395.715244311] [detector_node_0]: drone 0 [OPEN] camera 8.0 fps, inferred 7.8 fps, pose 50 Hz, best person 0.88 (below-threshold best 0.55), hits 1 | ms/frame: total 35, yolo 17 (pre 4 / gpu 8 / post 4) | delay ms median/max: pose 2/14, att -2/10, img+ 8/17
+[INFO] [1790944396.305789573] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944401.204533088] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944401.829004807] [detector_node_0]: HAZARD d0-4: person conf=0.67 at N=21.1 E=13.9 (alt 10.0m, drone 0) - swarm list now 8
+[INFO] [1790944404.340587874] [detector_node_0]: peer hazard d2-2 at N=14.5 E=75.0: added to swarm list
+[INFO] [1790944405.714691180] [detector_node_0]: drone 0 [OPEN] camera 9.4 fps, inferred 8.0 fps, pose 50 Hz, best person 0.87 (below-threshold best 0.61), hits 1 | ms/frame: total 39, yolo 21 (pre 5 / gpu 9 / post 6) | delay ms median/max: pose 2/16, att -2/12, img+ 8/17
+[INFO] [1790944409.109918915] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944414.105566855] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944415.714973623] [detector_node_0]: drone 0 [OPEN] camera 10.8 fps, inferred 3.4 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.55), hits 0 | ms/frame: total 35, yolo 17 (pre 5 / gpu 9 / post 3) | delay ms median/max: pose 1/14, att -2/10, img+ 8/17
+[INFO] [1790944419.210506625] [detector_node_0]: HAZARD d0-5: person conf=0.80 at N=25.9 E=16.2 (alt 10.0m, drone 0) - swarm list now 10
+[INFO] [1790944419.220480963] [detector_node_0]: peer hazard d2-3 at N=22.4 E=80.2: added to swarm list
+[INFO] [1790944420.723839798] [detector_node_0]: drone 0 [OPEN] camera 8.2 fps, inferred 8.0 fps, pose 50 Hz, best person 0.91 (below-threshold best 0.64), hits 1 | ms/frame: total 36, yolo 18 (pre 4 / gpu 8 / post 4) | delay ms median/max: pose 1/12, att -3/11, img+ 8/16
+[INFO] [1790944422.104556097] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944427.104196209] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944430.715129378] [detector_node_0]: drone 0 [OPEN] camera 9.2 fps, inferred 6.4 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.34), hits 0 | ms/frame: total 35, yolo 18 (pre 5 / gpu 9 / post 4) | delay ms median/max: pose 1/13, att -3/9, img+ 10/22
+[INFO] [1790944435.117622691] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944440.005938820] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944440.715613705] [detector_node_0]: drone 0 [OPEN] camera 9.8 fps, inferred 1.2 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.00), hits 0 | ms/frame: total 37, yolo 17 (pre 5 / gpu 9 / post 2) | delay ms median/max: pose 1/15, att -3/11, img+ 9/20
+[INFO] [1790944445.714865180] [detector_node_0]: drone 0 [OPEN] camera 8.0 fps, inferred 8.0 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.00), hits 0 | ms/frame: total 36, yolo 19 (pre 5 / gpu 9 / post 4) | delay ms median/max: pose 1/12, att -3/9, img+ 10/21
+[INFO] [1790944447.918345801] [detector_node_0]: drone 0 detection gate -> closed
+[INFO] [1790944453.005064363] [detector_node_0]: drone 0 detection gate -> OPEN
+[INFO] [1790944453.359430325] [detector_node_0]: saw person at N=22.1 E=29.8 - already logged by drone 1 as d1-1, not logged again
+[INFO] [1790944455.715504716] [detector_node_0]: drone 0 [OPEN] camera 10.4 fps, inferred 5.6 fps, pose 50 Hz, best person 0.69 (below-threshold best 0.64), hits 0 | ms/frame: total 34, yolo 17 (pre 5 / gpu 8 / post 3) | delay ms median/max: pose 1/14, att -3/10, img+ 9/18
+[INFO] [1790944460.714845529] [detector_node_0]: drone 0 [OPEN] camera 9.6 fps, inferred 9.8 fps, pose 50 Hz, best person 0.00 (below-threshold best 0.57), hits 0 | ms/frame: total 36, yolo 18 (pre 5 / gpu 8 / post 4) | delay ms median/max: pose 1/15, att -3/11, img+ 10/17
+[INFO] [1790944461.004076242] [detector_node_0]: drone 0 detection gate -> closed
