@@ -41,3 +41,13 @@ def test_gives_up_after_max_retries(monkeypatch):
     p = Scripted([RuntimeError("503 UNAVAILABLE")] * 3)
     with pytest.raises(LLMError, match="after 3 attempts"):
         p.generate_json("s", "u")
+
+
+def test_daily_quota_fails_fast_short_rate_limit_retries():
+    daily = RuntimeError("429 RESOURCE_EXHAUSTED. Quota exceeded ... Please retry in 7h22m20.95s.")
+    p = Scripted([daily, '{"ok": 1}'])
+    with pytest.raises(LLMError, match="quota exhausted"):
+        p.generate_json("s", "u")
+    assert p.outcomes == ['{"ok": 1}']                       # no retry burned
+    short = RuntimeError("429 RESOURCE_EXHAUSTED. Please retry in 21.5s.")
+    assert Scripted([short, '{"ok": 2}']).generate_json("s", "u")["ok"] == 2
