@@ -13,12 +13,14 @@
       "mean": 0.18
     },
     "takeover_events": [],
-    "anomalies": [],
-    "summary": "Mock narrative: run with a live provider for a written summary."
+    "anomalies": [
+      "duplicate hazard d1-1 suppressed (already logged by drone 1)"
+    ],
+    "summary": "Three drones each flew eight survey lanes covering the full 2700.0\u202fm\u00b2 area at 10\u202fm altitude. They detected eleven person hazards, matching all ground\u2011truth targets with confidence values between 0.68 and 0.92 and no false positives. Verification passed for all drones and the mission lasted 133.7\u202fs from offboard engagement to landing. All drones returned home, landed, and reported 50% battery remaining. The complete lane coverage and successful hazard mapping were confirmed by the ground\u2011station logs."
   },
   "meta": {
-    "provider": "mock",
-    "model": "mock",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
     "evidence_ids": [
       "survey_node_0:L72",
       "survey_node_1:L72",
@@ -44,7 +46,17 @@
     "unsupported_numbers": [],
     "attempts": 1,
     "error": null,
-    "latency_s": 0.0,
-    "citations": []
+    "latency_s": 4.529,
+    "citations": [
+      "survey_node_0:L72",
+      "survey_node_1:L72",
+      "survey_node_2:L72",
+      "ground_station:L22",
+      "ground_station:L23",
+      "ground_station:L29",
+      "ground_station:L40",
+      "detector_node_0:L47",
+      "ground_station:L159"
+    ]
   }
 }

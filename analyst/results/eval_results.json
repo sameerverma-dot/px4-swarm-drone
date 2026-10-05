@@ -1,0 +1,803 @@
+{
+  "meta": {
+    "mission": "swarm_20261002_180220",
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "judge_provider": "groq",
+    "judge_model": "openai/gpt-oss-120b",
+    "top_k": 8,
+    "n_questions": 16,
+    "run_at": "2026-10-05 16:47 UTC",
+    "wall_time_s": 95.0
+  },
+  "summary": {
+    "n": 16,
+    "correct": 12,
+    "accuracy": 0.75,
+    "by_type": {
+      "numeric": {
+        "n": 5,
+        "correct": 4,
+        "accuracy": 0.8
+      },
+      "entity": {
+        "n": 4,
+        "correct": 2,
+        "accuracy": 0.5
+      },
+      "explanatory": {
+        "n": 3,
+        "correct": 2,
+        "accuracy": 0.6666666666666666
+      },
+      "unanswerable": {
+        "n": 4,
+        "correct": 4,
+        "accuracy": 1.0
+      }
+    },
+    "refusal_rate_unanswerable": 1.0,
+    "refused_unanswerable": 4,
+    "n_unanswerable": 4,
+    "false_refusal_rate_answerable": 0.25,
+    "citation_validity_rate": 1.0,
+    "n_citation_checked": 9,
+    "citation_support_rate": 1.0,
+    "n_support_checked": 9,
+    "mean_latency_s": 0.9667500000000002,
+    "qa_invalid": 0
+  },
+  "questions": [
+    {
+      "id": "n_map_hazards",
+      "type": "numeric",
+      "question": "How many unique hazards are in the final hazard map?",
+      "expected": 11,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "(?<![\\d.])11(?![\\d])"
+      ],
+      "facts": [],
+      "source": "n_map_hazards"
+    },
+    {
+      "id": "n_own_hazards",
+      "type": "numeric",
+      "question": "How many hazards did drone 0 detect itself (its own detections)?",
+      "expected": 5,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "(?<![\\d.])5(?![\\d])"
+      ],
+      "facts": [],
+      "source": "drones.0.n_own_hazards"
+    },
+    {
+      "id": "n_truth",
+      "type": "numeric",
+      "question": "How many ground-truth targets were placed for this mission?",
+      "expected": 11,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "(?<![\\d.])11(?![\\d])"
+      ],
+      "facts": [],
+      "source": "truth.targets_truth"
+    },
+    {
+      "id": "n_track_samples",
+      "type": "numeric",
+      "question": "How many samples does drone 1's flown survey track contain?",
+      "expected": 6536,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "(?<![\\d.])6536(?![\\d])"
+      ],
+      "facts": [],
+      "source": "drones.1.track_samples"
+    },
+    {
+      "id": "n_lane_spacing",
+      "type": "numeric",
+      "question": "What lane spacing did the survey use, in metres?",
+      "expected": 3.99,
+      "tolerance": 0.005,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "(?<![\\d.])3\\.99(?![\\d])"
+      ],
+      "facts": [],
+      "source": "lane_spacing.lane_spacing_m"
+    },
+    {
+      "id": "e_first_hazard",
+      "type": "entity",
+      "question": "Which drone detected the first hazard of the mission?",
+      "expected": "drone 0",
+      "tolerance": 0.0,
+      "accept": [
+        "\\bdrone[\\s_#-]*0\\b"
+      ],
+      "reject": [],
+      "support": [
+        "d0\\-1"
+      ],
+      "facts": [],
+      "source": "first_hazard"
+    },
+    {
+      "id": "e_landed_last",
+      "type": "entity",
+      "question": "Which drone landed last?",
+      "expected": "drone 2",
+      "tolerance": 0.0,
+      "accept": [
+        "\\bdrone[\\s_#-]*2\\b"
+      ],
+      "reject": [],
+      "support": [
+        "drone 2: LANDED"
+      ],
+      "facts": [],
+      "source": "landing_order"
+    },
+    {
+      "id": "e_takeover",
+      "type": "entity",
+      "question": "Which drone took over another drone's lanes during this mission?",
+      "expected": "none",
+      "tolerance": 0.0,
+      "accept": [
+        "\\bnone\\b",
+        "\\bno drone\\b",
+        "\\bno (lane )?takeovers?\\b",
+        "\\bdid not\\b",
+        "\\bdidn't\\b",
+        "\\bnot take over\\b",
+        "\\bno lanes\\b",
+        "\\bno other drone\\b",
+        "\\bneither\\b"
+      ],
+      "reject": [
+        "\\bdrone[\\s_]*\\d\\s+took over\\b(?! *: *none)"
+      ],
+      "support": [
+        "took over: none"
+      ],
+      "facts": [],
+      "source": "drones.*.took_over"
+    },
+    {
+      "id": "e_dedup",
+      "type": "entity",
+      "question": "Which drone saw the person already logged as hazard d1-1 but did not log it again?",
+      "expected": "drone 0",
+      "tolerance": 0.0,
+      "accept": [
+        "\\bdrone[\\s_#-]*0\\b"
+      ],
+      "reject": [],
+      "support": [
+        "already logged"
+      ],
+      "facts": [],
+      "source": "suppressed_duplicates"
+    },
+    {
+      "id": "x_no_takeover",
+      "type": "explanatory",
+      "question": "Why was there no lane takeover in this mission?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "took over: none",
+        "8/8",
+        "own lanes"
+      ],
+      "facts": [
+        "takeover was enabled on every drone: True",
+        "drone 0: VERIFY PASS, own lanes 8/8, took over: none, returned=True, why=mission complete, RETURNING at T+121.6s after finishing its lanes",
+        "drone 1: VERIFY PASS, own lanes 8/8, took over: none, returned=True, why=mission complete, RETURNING at T+122.2s after finishing its lanes",
+        "drone 2: VERIFY PASS, own lanes 8/8, took over: none, returned=True, why=mission complete, RETURNING at T+122.8s after finishing its lanes",
+        "no drone returned early or left lanes unflown, so no band was orphaned and none needed taking over"
+      ],
+      "source": "drones.*.{verify,own_lanes,took_over,takeover_enabled}"
+    },
+    {
+      "id": "x_area_split",
+      "type": "explanatory",
+      "question": "How was the survey area divided among the drones?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "shared east",
+        "band \\d"
+      ],
+      "facts": [
+        "survey area north 0.0-30.0 m, east 0.0-90.0 m, altitude 10.0 m, 3 drones",
+        "drone 0 flew band 0 = shared east [0.0, 30.0], 8 lanes",
+        "drone 1 flew band 1 = shared east [30.0, 60.0], 8 lanes",
+        "drone 2 flew band 2 = shared east [60.0, 90.0], 8 lanes"
+      ],
+      "source": "area, drones.*.band"
+    },
+    {
+      "id": "x_lane_spacing",
+      "type": "explanatory",
+      "question": "How was the survey's lane spacing derived?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [
+        "detection swath"
+      ],
+      "facts": [
+        "detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude",
+        "20% sidelap",
+        "lane spacing = 3.99 m (the swath reduced by the sidelap)"
+      ],
+      "source": "lane_spacing"
+    },
+    {
+      "id": "u_battery_voltage",
+      "type": "unanswerable",
+      "question": "What was the battery voltage of drone 1 at landing?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [],
+      "facts": [],
+      "source": "no record matches /volt/"
+    },
+    {
+      "id": "u_wind",
+      "type": "unanswerable",
+      "question": "What was the wind speed during the mission?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [],
+      "facts": [],
+      "source": "no record matches /\\bwind\\b/"
+    },
+    {
+      "id": "u_gps_sats",
+      "type": "unanswerable",
+      "question": "How many GPS satellites did drone 2 have during the survey?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [],
+      "facts": [],
+      "source": "no record matches /satellite/"
+    },
+    {
+      "id": "u_cpu_temp",
+      "type": "unanswerable",
+      "question": "What was the CPU temperature of drone 0's onboard computer?",
+      "expected": null,
+      "tolerance": 0.0,
+      "accept": [],
+      "reject": [],
+      "support": [],
+      "facts": [],
+      "source": "no record matches /temperat/"
+    }
+  ],
+  "results": [
+    {
+      "id": "n_map_hazards",
+      "type": "numeric",
+      "question": "How many unique hazards are in the final hazard map?",
+      "expected": 11,
+      "answer": "There are 11 unique hazards in the final hazard map.",
+      "answerable": true,
+      "citations": [
+        "map:summary"
+      ],
+      "retrieved_ids": [
+        "map:summary",
+        "map:1",
+        "map:2",
+        "map:3",
+        "map:4",
+        "map:5",
+        "map:6",
+        "map:7"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.91,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "n_own_hazards",
+      "type": "numeric",
+      "question": "How many hazards did drone 0 detect itself (its own detections)?",
+      "expected": 5,
+      "answer": "5",
+      "answerable": true,
+      "citations": [
+        "hazards_d0:summary"
+      ],
+      "retrieved_ids": [
+        "hazards_d0:summary",
+        "hazards_d1:summary",
+        "hazards_d2:summary",
+        "survey_node_0:L50",
+        "survey_node_0:L13",
+        "survey_node_0:L18",
+        "survey_node_0:L23",
+        "survey_node_0:L28"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.706,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "n_truth",
+      "type": "numeric",
+      "question": "How many ground-truth targets were placed for this mission?",
+      "expected": 11,
+      "answer": "8 ground-truth targets were placed.",
+      "answerable": true,
+      "citations": [
+        "targets:sw0",
+        "targets:sw2",
+        "targets:sw4",
+        "targets:sw6",
+        "targets:sw9",
+        "targets:pairA",
+        "targets:pairB",
+        "targets:bnd"
+      ],
+      "retrieved_ids": [
+        "targets:sw0",
+        "targets:sw2",
+        "targets:sw4",
+        "targets:sw6",
+        "targets:sw9",
+        "targets:pairA",
+        "targets:pairB",
+        "targets:bnd"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 1.025,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": false
+    },
+    {
+      "id": "n_track_samples",
+      "type": "numeric",
+      "question": "How many samples does drone 1's flown survey track contain?",
+      "expected": 6536,
+      "answer": "Drone 1's flown survey track contains 6536 samples.",
+      "answerable": true,
+      "citations": [
+        "track_d1:summary",
+        "survey_node_1:L54"
+      ],
+      "retrieved_ids": [
+        "track_d1:summary",
+        "track_d0:summary",
+        "track_d2:summary",
+        "survey_node_1:L54",
+        "survey_node_0:L54",
+        "survey_node_2:L54",
+        "track_d1:lane0",
+        "track_d1:lane1"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.82,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "n_lane_spacing",
+      "type": "numeric",
+      "question": "What lane spacing did the survey use, in metres?",
+      "expected": 3.99,
+      "answer": "3.99 m",
+      "answerable": true,
+      "citations": [
+        "survey_node_0:L1"
+      ],
+      "retrieved_ids": [
+        "survey_node_0:L1",
+        "survey_node_1:L1",
+        "survey_node_2:L1",
+        "survey_node_0:L13",
+        "survey_node_0:L18",
+        "survey_node_0:L23",
+        "survey_node_0:L28",
+        "survey_node_0:L33"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.744,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "e_first_hazard",
+      "type": "entity",
+      "question": "Which drone detected the first hazard of the mission?",
+      "expected": "drone 0",
+      "answer": "",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "map:summary",
+        "survey_node_0:L51",
+        "survey_node_1:L51",
+        "survey_node_2:L51",
+        "map:1",
+        "map:2",
+        "map:3",
+        "map:4"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.352,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": false
+    },
+    {
+      "id": "e_landed_last",
+      "type": "entity",
+      "question": "Which drone landed last?",
+      "expected": "drone 2",
+      "answer": "Drone 2 landed last at T+143.5\u202fs.",
+      "answerable": true,
+      "citations": [
+        "ground_station:L151",
+        "ground_station:L157",
+        "ground_station:L158"
+      ],
+      "retrieved_ids": [
+        "ground_station:L151",
+        "ground_station:L157",
+        "ground_station:L158",
+        "track_d0:return",
+        "track_d1:return",
+        "track_d2:return",
+        "map:summary",
+        "ground_station:L159"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.854,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "e_takeover",
+      "type": "entity",
+      "question": "Which drone took over another drone's lanes during this mission?",
+      "expected": "none",
+      "answer": "No drone took over another drone's lanes; each drone\u2019s record shows took over: none.",
+      "answerable": true,
+      "citations": [
+        "survey_node_0:L72",
+        "survey_node_1:L72",
+        "survey_node_2:L72"
+      ],
+      "retrieved_ids": [
+        "map:summary",
+        "survey_node_0:L72",
+        "survey_node_1:L72",
+        "survey_node_2:L72",
+        "survey_node_0:L2",
+        "survey_node_1:L2",
+        "survey_node_2:L2",
+        "survey_node_0:L51"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.923,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "e_dedup",
+      "type": "entity",
+      "question": "Which drone saw the person already logged as hazard d1-1 but did not log it again?",
+      "expected": "drone 0",
+      "answer": "",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "detector_node_0:L47",
+        "ground_hazards:r3",
+        "ground_hazards:r4",
+        "ground_station:L29",
+        "sightings_d1:d1-1",
+        "sightings_d0:d1-1",
+        "detector_node_0:L14",
+        "detector_node_2:L14"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 2.29,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": false
+    },
+    {
+      "id": "x_no_takeover",
+      "type": "explanatory",
+      "question": "Why was there no lane takeover in this mission?",
+      "expected": null,
+      "answer": "There was no lane takeover because each drone completed all of its own lanes (8/8), so no takeover was needed.",
+      "answerable": true,
+      "citations": [
+        "survey_node_0:L72",
+        "survey_node_1:L72",
+        "survey_node_2:L72"
+      ],
+      "retrieved_ids": [
+        "survey_node_0:L72",
+        "survey_node_1:L72",
+        "survey_node_2:L72",
+        "survey_node_0:L51",
+        "survey_node_1:L51",
+        "survey_node_2:L51",
+        "survey_node_0:L2",
+        "survey_node_1:L2"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 1.092,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": 5,
+      "judge_reason": "The answer correctly states that no lane takeover occurred because each drone completed all of its own lanes (8/8), matching the ground-truth facts and providing the correct reason without contradiction.",
+      "judge_latency_s": 1.026,
+      "correct": true
+    },
+    {
+      "id": "x_area_split",
+      "type": "explanatory",
+      "question": "How was the survey area divided among the drones?",
+      "expected": null,
+      "answer": "The records do not specify how the total survey area was partitioned among the three drones.",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "run:config",
+        "survey_node_0:L49",
+        "survey_node_1:L49",
+        "survey_node_2:L49",
+        "survey_node_0:L7",
+        "survey_node_1:L7",
+        "survey_node_2:L7",
+        "survey_node_0:L50"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 1.127,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": "not judged: refused or invalid answer",
+      "judge_latency_s": null,
+      "correct": false
+    },
+    {
+      "id": "x_lane_spacing",
+      "type": "explanatory",
+      "question": "How was the survey's lane spacing derived?",
+      "expected": null,
+      "answer": "The lane spacing was derived from a detection swath of 4.99\u202fm (camera footprint 23.71\u202fm) at 10.0\u202fm altitude with a 20% sidelap, giving a lane spacing of 3.99\u202fm.",
+      "answerable": true,
+      "citations": [
+        "survey_node_0:L1",
+        "survey_node_1:L1",
+        "survey_node_2:L1"
+      ],
+      "retrieved_ids": [
+        "survey_node_0:L1",
+        "survey_node_1:L1",
+        "survey_node_2:L1",
+        "track_d0:lane0",
+        "track_d0:lane1",
+        "track_d0:lane2",
+        "track_d0:lane3",
+        "track_d0:lane4"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 1.06,
+      "citations_valid": true,
+      "citation_support": true,
+      "judge_score": 5,
+      "judge_reason": "The answer correctly states the detection swath, camera footprint, altitude, 20% sidelap, and the resulting lane spacing of 3.99\u202fm, matching all ground\u2011truth facts with no contradictions.",
+      "judge_latency_s": 1.934,
+      "correct": true
+    },
+    {
+      "id": "u_battery_voltage",
+      "type": "unanswerable",
+      "question": "What was the battery voltage of drone 1 at landing?",
+      "expected": null,
+      "answer": "Battery voltage at landing not recorded in the provided records.",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "ground_station:L6",
+        "ground_station:L134",
+        "ground_station:L157",
+        "detector_node_1:L6",
+        "sightings_d1:below",
+        "ground_station:L29",
+        "ground_station:L40",
+        "ground_station:L52"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.771,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "u_wind",
+      "type": "unanswerable",
+      "question": "What was the wind speed during the mission?",
+      "expected": null,
+      "answer": "Wind speed not recorded in the mission records.",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "survey_node_0:L51",
+        "survey_node_1:L51",
+        "survey_node_2:L51",
+        "run:config",
+        "survey_node_0:L72",
+        "survey_node_1:L72",
+        "survey_node_2:L72"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.951,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "u_gps_sats",
+      "type": "unanswerable",
+      "question": "How many GPS satellites did drone 2 have during the survey?",
+      "expected": null,
+      "answer": "The records do not state how many GPS satellites drone 2 had during the survey.",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "ground_station:L5",
+        "survey_node_2:L49",
+        "survey_node_2:L7",
+        "survey_node_2:L50",
+        "survey_node_2:L51",
+        "survey_node_2:L52",
+        "survey_node_2:L53",
+        "survey_node_2:L2"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 0.614,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    },
+    {
+      "id": "u_cpu_temp",
+      "type": "unanswerable",
+      "question": "What was the CPU temperature of drone 0's onboard computer?",
+      "expected": null,
+      "answer": "CPU temperature not provided in the records.",
+      "answerable": false,
+      "citations": [],
+      "retrieved_ids": [
+        "hazards_d0:summary",
+        "hazards_d1:summary",
+        "hazards_d2:summary",
+        "track_d0:lane0",
+        "track_d0:lane1",
+        "track_d0:lane2",
+        "track_d0:lane3",
+        "track_d0:lane4"
+      ],
+      "qa_valid": true,
+      "qa_error": null,
+      "attempts": 1,
+      "latency_s": 1.229,
+      "citations_valid": null,
+      "citation_support": null,
+      "judge_score": null,
+      "judge_reason": null,
+      "judge_latency_s": null,
+      "correct": true
+    }
+  ]
+}
