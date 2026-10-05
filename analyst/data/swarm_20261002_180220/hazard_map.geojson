@@ -1,0 +1,219 @@
+{
+  "type": "FeatureCollection",
+  "properties": {
+    "home_lat": 23.2127,
+    "home_lon": 72.6846,
+    "frame": "PX4 local NED, home at origin"
+  },
+  "features": [
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68467233,
+          23.21275327
+        ]
+      },
+      "properties": {
+        "id": 1,
+        "class": "person",
+        "confidence": 0.87,
+        "north_m": 5.93,
+        "east_m": 7.4,
+        "detected_at_alt_m": 10.0,
+        "drone": "0"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68528489,
+          23.21277249
+        ]
+      },
+      "properties": {
+        "id": 2,
+        "class": "person",
+        "confidence": 0.92,
+        "north_m": 8.07,
+        "east_m": 70.07,
+        "detected_at_alt_m": 10.0,
+        "drone": "2"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68489089,
+          23.21289889
+        ]
+      },
+      "properties": {
+        "id": 3,
+        "class": "person",
+        "confidence": 0.89,
+        "north_m": 22.14,
+        "east_m": 29.76,
+        "detected_at_alt_m": 10.0,
+        "drone": "1"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.6849551,
+          23.21283349
+        ]
+      },
+      "properties": {
+        "id": 4,
+        "class": "person",
+        "confidence": 0.87,
+        "north_m": 14.86,
+        "east_m": 36.33,
+        "detected_at_alt_m": 10.0,
+        "drone": "1"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68469608,
+          23.21279881
+        ]
+      },
+      "properties": {
+        "id": 5,
+        "class": "person",
+        "confidence": 0.9,
+        "north_m": 11.0,
+        "east_m": 9.83,
+        "detected_at_alt_m": 10.0,
+        "drone": "0"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68497358,
+          23.21283529
+        ]
+      },
+      "properties": {
+        "id": 6,
+        "class": "person",
+        "confidence": 0.9,
+        "north_m": 15.06,
+        "east_m": 38.22,
+        "detected_at_alt_m": 10.0,
+        "drone": "1"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68471641,
+          23.21284391
+        ]
+      },
+      "properties": {
+        "id": 7,
+        "class": "person",
+        "confidence": 0.88,
+        "north_m": 16.02,
+        "east_m": 11.91,
+        "detected_at_alt_m": 10.0,
+        "drone": "0"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68473567,
+          23.21288784
+        ]
+      },
+      "properties": {
+        "id": 8,
+        "class": "person",
+        "confidence": 0.87,
+        "north_m": 20.91,
+        "east_m": 13.88,
+        "detected_at_alt_m": 10.0,
+        "drone": "0"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68533181,
+          23.21283358
+        ]
+      },
+      "properties": {
+        "id": 9,
+        "class": "person",
+        "confidence": 0.87,
+        "north_m": 14.87,
+        "east_m": 74.87,
+        "detected_at_alt_m": 10.0,
+        "drone": "2"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68475864,
+          23.21293365
+        ]
+      },
+      "properties": {
+        "id": 10,
+        "class": "person",
+        "confidence": 0.91,
+        "north_m": 26.01,
+        "east_m": 16.23,
+        "detected_at_alt_m": 10.0,
+        "drone": "0"
+      }
+    },
+    {
+      "type": "Feature",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          72.68538098,
+          23.21289763
+        ]
+      },
+      "properties": {
+        "id": 11,
+        "class": "person",
+        "confidence": 0.86,
+        "north_m": 22.0,
+        "east_m": 79.9,
+        "detected_at_alt_m": 10.0,
+        "drone": "2"
+      }
+    }
+  ]
+}
