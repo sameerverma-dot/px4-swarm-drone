@@ -23,6 +23,10 @@ python -m analyst eval   --provider gemini        # -> analyst/results/eval_tabl
 pytest analyst/tests                              # offline, mock provider, no key needed
 ```
 
+In a shell with ROS sourced (`/opt/ros/humble` on `PYTHONPATH`), pytest auto-loads ROS's `launch_testing`
+plugin, which fails to import inside a plain venv. Run the tests with
+`PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest analyst/tests`, or in a shell without ROS sourced.
+
 `--mission <id>` picks a folder under `analyst/data/`. It's optional when there is only one.
 Keys are read only from the environment: `GEMINI_API_KEY` (default live provider) or `GROQ_API_KEY`.
 Other settings are environment variables too: `ANALYST_GEMINI_MODEL` (default `gemini-2.5-flash`),
