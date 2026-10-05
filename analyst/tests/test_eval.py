@@ -87,3 +87,29 @@ def test_unanswerable_answered_is_wrong_and_refusal_of_answerable_is_wrong():
     assert s["refusal_rate_unanswerable"] == 0.0
     assert s["false_refusal_rate_answerable"] == 1.0
     assert s["mean_latency_s"] == 2.0
+
+
+def test_interrupted_eval_resumes_from_checkpoint(mission, tmp_path):
+    import pytest
+    from analyst.llm import LLMError
+    f = compute_facts(mission)
+    oracle = _oracle(f)
+    n = {"qa": 0}
+
+    def flaky(system, user, task):
+        if task == "qa":
+            n["qa"] += 1
+            if n["qa"] == 3:
+                raise LLMError("gemini failed after 8 attempts: 503 UNAVAILABLE")
+        return oracle(system, user, task)
+
+    with pytest.raises(SystemExit, match="rerun the same command to resume"):
+        run_eval(mission, provider=MockProvider(flaky), out_dir=tmp_path)
+    assert (tmp_path / ".eval_progress_mock.json").exists()
+    assert not (tmp_path / "eval_table_mock.md").exists()
+
+    second = MockProvider(oracle)
+    out = run_eval(mission, provider=second, out_dir=tmp_path)
+    assert out["summary"]["accuracy"] == 1.0 and out["summary"]["n"] == 16
+    assert sum(c["task"] == "qa" for c in second.calls) == 14          # 2 reused
+    assert not (tmp_path / ".eval_progress_mock.json").exists()

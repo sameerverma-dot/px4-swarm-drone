@@ -128,7 +128,7 @@ analyst/
   report.py     MissionReport schema, narrative checks, Markdown render
   evalset.py    eval questions generated from facts
   evaluate.py   scoring, eval_results.json, eval_table.md
-  tests/        27 offline tests (mock provider)
+  tests/        31 offline tests (mock provider)
   results/      sample_report.md, eval_table*.md, eval_results*.json
 ```
 

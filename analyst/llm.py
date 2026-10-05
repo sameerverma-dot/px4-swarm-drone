@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import time
 from typing import Callable
 
@@ -63,15 +64,19 @@ class Provider:
                 out = parse_json(text)
                 out["_latency_s"] = round(self._last_call - t0, 3)
                 return out
-            except LLMError as e:                            # bad JSON: retry
+            except LLMError as e:                            # bad JSON: retry soon
                 self._last_call = time.monotonic()
-                last_err = e
-            except Exception as e:                           # network / rate limit
+                last_err, delay = e, 2.0
+            except Exception as e:                           # network / overload / rate limit
                 self._last_call = time.monotonic()
                 last_err = e
                 if not _transient(e):
                     raise LLMError(f"{self.name} call failed: {_safe(e)}") from None
-            time.sleep(min(2 ** (attempt + 1), 30))
+                delay = min(config.RETRY_BASE_S * 2 ** attempt, 60.0)
+            if attempt + 1 < config.MAX_RETRIES:
+                print(f"    {self.name}: {_safe(last_err)[:70]}... retry {attempt + 2}/"
+                      f"{config.MAX_RETRIES} in {delay:.0f}s", file=sys.stderr, flush=True)
+                time.sleep(delay)
         raise LLMError(f"{self.name} failed after {config.MAX_RETRIES} attempts: {_safe(last_err)}")
 
 
