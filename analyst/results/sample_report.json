@@ -1,0 +1,61 @@
+{
+  "report": {
+    "mission_id": "swarm_20261002_180220",
+    "n_drones": 3,
+    "area_covered_m2": 2700.0,
+    "targets_found": 11,
+    "targets_truth": 11,
+    "false_positives": 0,
+    "duplicates": 0,
+    "geotag_error_m": {
+      "min": 0.09,
+      "max": 0.29,
+      "mean": 0.18
+    },
+    "takeover_events": [],
+    "anomalies": [
+      "duplicate hazard d1-1 suppressed by drone 0"
+    ],
+    "summary": "The three\u2011drone swarm launched at 18:02:20 on 2026\u201110\u201102 and surveyed the full 30\u202f\u00d7\u202f90\u202fm area, dividing it into eight lanes per band. All drones completed their eight assigned lanes, verified their tracks (VERIFY PASS) and returned home, landing with 50\u202f% battery remaining. The mission detected all eleven unique person hazards, with final confidence values ranging from 0.86 to 0.92, matching the ground\u2011truth map within the 5\u202fm radius. No false positives or missed targets were recorded. One duplicate detection was suppressed when drone 0 observed a person already logged by drone 1 (d1\u20111)."
+  },
+  "meta": {
+    "provider": "groq",
+    "model": "openai/gpt-oss-120b",
+    "evidence_ids": [
+      "survey_node_0:L72",
+      "survey_node_1:L72",
+      "survey_node_2:L72",
+      "survey_node_0:L2",
+      "detector_node_0:L47",
+      "sightings_d0:below",
+      "sightings_d1:below",
+      "sightings_d2:below",
+      "survey_node_0:L51",
+      "ground_station:L159",
+      "ground_station:L152",
+      "ground_station:L7",
+      "ground_station:L12",
+      "ground_station:L22",
+      "ground_station:L23",
+      "ground_station:L29",
+      "ground_station:L40",
+      "survey_node_1:L2",
+      "survey_node_2:L2"
+    ],
+    "narrative_valid": true,
+    "unsupported_numbers": [],
+    "attempts": 1,
+    "error": null,
+    "latency_s": 2.88,
+    "citations": [
+      "survey_node_0:L2",
+      "survey_node_0:L72",
+      "survey_node_1:L72",
+      "survey_node_2:L72",
+      "ground_station:L7",
+      "ground_station:L152",
+      "ground_station:L159",
+      "detector_node_0:L47"
+    ]
+  }
+}
