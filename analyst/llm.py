@@ -72,12 +72,26 @@ class Provider:
                 last_err = e
                 if not _transient(e):
                     raise LLMError(f"{self.name} call failed: {_safe(e)}") from None
+                wait_s = _server_retry_after(e)
+                if wait_s is not None and wait_s > 120:
+                    # e.g. a daily free-tier quota: "Please retry in 7h22m". Retrying now is pointless.
+                    raise LLMError(f"{self.name} quota exhausted for model {self.model} (server says retry "
+                                   f"in {wait_s / 3600:.1f} h): {_safe(e)}") from None
                 delay = min(config.RETRY_BASE_S * 2 ** attempt, 60.0)
             if attempt + 1 < config.MAX_RETRIES:
                 print(f"    {self.name}: {_safe(last_err)[:70]}... retry {attempt + 2}/"
                       f"{config.MAX_RETRIES} in {delay:.0f}s", file=sys.stderr, flush=True)
                 time.sleep(delay)
         raise LLMError(f"{self.name} failed after {config.MAX_RETRIES} attempts: {_safe(last_err)}")
+
+
+def _server_retry_after(e: Exception) -> float | None:
+    """Seconds from a 'Please retry in 7h22m20.9s' style hint in the error, if any."""
+    m = re.search(r"retry in (?:(\d+)h)?(?:(\d+)m)?(?:([\d.]+)s)?", str(e))
+    if not m or not any(m.groups()):
+        return None
+    h, mi, se = (float(g) if g else 0.0 for g in m.groups())
+    return h * 3600 + mi * 60 + se
 
 
 def _transient(e: Exception) -> bool:
