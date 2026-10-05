@@ -11,7 +11,7 @@ RESULTS_DIR = Path(os.environ.get("ANALYST_RESULTS_DIR", PKG_DIR / "results"))
 
 DEFAULT_PROVIDER = os.environ.get("ANALYST_PROVIDER", "mock")
 MODELS = {
-    "gemini": os.environ.get("ANALYST_GEMINI_MODEL", "gemini-2.5-flash"),
+    "gemini": os.environ.get("ANALYST_GEMINI_MODEL", "gemini-3.8-flash"),
     "groq": os.environ.get("ANALYST_GROQ_MODEL", "llama-3.3-70b-versatile"),
     "mock": "mock",
 }
