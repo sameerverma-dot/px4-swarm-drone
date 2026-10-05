@@ -17,9 +17,9 @@ It is pure Python on files only: no ROS, Gazebo, PX4 or GPU. All tests run offli
 ```bash
 pip install -r analyst/requirements.txt
 python -m analyst inventory                       # files, columns, row counts, records
-python -m analyst ask "Which drone took over lanes, and why?" --provider gemini
-python -m analyst report --provider gemini        # -> analyst/results/sample_report.md
-python -m analyst eval   --provider gemini        # -> analyst/results/eval_table.md
+python -m analyst ask "Which drone took over lanes, and why?" --provider groq
+python -m analyst report --provider groq          # -> analyst/results/sample_report.md
+python -m analyst eval   --provider groq          # -> analyst/results/eval_table.md
 pytest analyst/tests                              # offline, mock provider, no key needed
 ```
 
@@ -28,7 +28,9 @@ plugin, which fails to import inside a plain venv. Run the tests with
 `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest analyst/tests`, or in a shell without ROS sourced.
 
 `--mission <id>` picks a folder under `analyst/data/`. It's optional when there is only one.
-Keys are read only from the environment: `GEMINI_API_KEY` (default live provider) or `GROQ_API_KEY`.
+Keys are read only from the environment: `GROQ_API_KEY` (`--provider groq`, used for the results below) or
+`GEMINI_API_KEY` (`--provider gemini`). Gemini's free tier allows only 20 requests per day per model, which is
+fewer than one eval run needs.
 Other settings are environment variables too: `ANALYST_GEMINI_MODEL` (default `gemini-3.8-flash`), `ANALYST_GROQ_MODEL` (default `openai/gpt-oss-120b`),
 `ANALYST_TOP_K` (8) and `ANALYST_MIN_CALL_INTERVAL_S` (4.5 s spacing for free-tier rate limits).
 
@@ -103,13 +105,48 @@ takeover.
 ## Results
 
 <!-- RESULTS:START -->
-**Live run: pending.** No API key was available in the build session. Run
-`python -m analyst eval --provider gemini` to write `results/eval_table.md`.
+Live run: Groq `openai/gpt-oss-120b` (answerer and judge), top_k=8, 16 questions, 2026-10-05.
+Full table in [`results/eval_table.md`](results/eval_table.md); per-question answers, citations and
+latencies in `results/eval_results.json`.
 
-Offline baseline (`results/eval_table_mock.md`): the mock provider just answers with the top retrieved
-record. It scores **31% (5/16)**: 4/5 numeric, 1/4 entity, 0/3 explanatory, 0/4 unanswerable refused,
-100% citation validity. This is the floor the LLM has to beat, and a check that the harness doesn't
-reward answering everything.
+| metric | live (gpt-oss-120b) | mock baseline |
+|---|---|---|
+| overall accuracy | **75% (12/16)** | 31% (5/16) |
+| numeric | 80% (4/5) | 80% (4/5) |
+| entity / event | 50% (2/4) | 25% (1/4) |
+| explanatory (judge ≥ 4) | 67% (2/3) | 0% (0/3) |
+| unanswerable correctly refused | **100% (4/4)** | 0% (0/4) |
+| false refusals on answerable questions | 25% (3/12) | 0% |
+| citation validity (cited ids exist and were retrieved) | **100% (9/9)** | 100% |
+| answers rejected by the citation check | 0 | 0 |
+| mean QA latency | 0.97 s | - |
+
+The mock baseline answers with the top retrieved record, so it shows the floor and checks that the harness
+doesn't reward answering everything.
+
+**Example (live, from the eval run):**
+
+> **Q:** Which drone took over another drone's lanes during this mission?
+> **A:** No drone took over another drone's lanes; each drone's record shows took over: none.
+> **Citations:** `survey_node_0:L72`, `survey_node_1:L72`, `survey_node_2:L72`. These are the three
+> `VERIFY PASS | drone N | own lanes 8/8 | took over: none ...` lines.
+
+**Failure analysis.** None of the 4 misses is a fabricated fact. Three are retrieval misses and one is a
+record-wording issue:
+
+| question | what happened | cause |
+|---|---|---|
+| How many ground-truth targets? (11) | answered "8" | top_k=8 returned 8 single-target records but not the `targets:summary` record that states 11. The model counted what it saw |
+| Which drone detected the first hazard? (drone 0) | refused | the retrieved map entries carry no time. The `T+` hazard log lines weren't in the top 8 |
+| Which drone saw d1-1 but didn't log it again? (drone 0) | refused | the right record was retrieved, but its text says `detector_node_0 ...` and never "drone 0" |
+| How was the area divided among the drones? | refused | no stemming: "drones" doesn't match the token "drone", so the `band i = shared east [...]` lines weren't retrieved |
+
+Two caveats, stated plainly:
+- The 100% citation-support figure is inflated by at least one case. For the targets question, the expected
+  number "11" matched the coordinate `N=11` in a cited record.
+- The report narrative passed the number guard, but it says hazard confidences were "between 0.68 and
+  0.92". That mixes first-report confidence (0.68 is d0-1's first report) with final-map confidence
+  (0.86–0.92). The guard checks that a number appears in the facts, not that it is used correctly.
 <!-- RESULTS:END -->
 
 ## Layout
