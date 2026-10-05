@@ -380,6 +380,12 @@ def load_track(path: Path, mid: str, t0, survey: SurveyLog | None) -> list[Recor
 LOG_DROP = {"gate", "waypoint_check", "waypoint_reached"}   # summarised per file instead
 
 
+def node_label(node: str) -> str:
+    """survey_node_0 -> 'survey_node_0 (drone 0)', so the text names the drone."""
+    m = re.search(r"_(\d+)$", node)
+    return f"{node} (drone {m.group(1)})" if m else node
+
+
 def load_log(rel: str, lines: list[LogLine], mid: str, t0) -> list[Record]:
     stem = Path(rel).stem
     recs: list[Record] = []
@@ -416,13 +422,13 @@ def load_log(rel: str, lines: list[LogLine], mid: str, t0) -> list[Record]:
                      f"batt={r['batt_pct']}% age={r['age_s']}s" for r in rows]
             text = f"{ln.node} swarm status {_tstr(t)}: " + "; ".join(parts)
         else:
-            text = f"{ln.node} {_tstr(t)}: {ln.msg}"
+            text = f"{node_label(ln.node)} {_tstr(t)}: {ln.msg}"
         recs.append(Record(f"{stem}:L{ln.lineno}", rel, f"line {ln.lineno}", mid, drone, t, text, fields))
     drone = node_drone(lines[0].node, "") if lines else None
     if gates:
         opens = [g for g in gates if "OPEN" in g.msg]
         recs.append(Record(f"{stem}:gate", rel, "summary", mid, drone, _rel_t(gates[0].ts, t0),
-                           f"{lines[0].node} detection gate: opened {len(opens)} times, "
+                           f"{node_label(lines[0].node)} detection gate: opened {len(opens)} times, "
                            f"{len(gates) - len(opens)} 'closed' lines, first {_tstr(_rel_t(gates[0].ts, t0))}, "
                            f"last {_tstr(_rel_t(gates[-1].ts, t0))}",
                            {"event": "gate_summary", "n_open": len(opens)}))
@@ -430,7 +436,7 @@ def load_log(rel: str, lines: list[LogLine], mid: str, t0) -> list[Record]:
         ok = sum(m.group(6) == "OK" for m in checks)
         cl = [float(m.group(5)) for m in checks]
         recs.append(Record(f"{stem}:wpcheck", rel, "summary", mid, drone, None,
-                           f"{lines[0].node} post-flight waypoint check: {ok}/{len(checks)} waypoints OK, "
+                           f"{node_label(lines[0].node)} post-flight waypoint check: {ok}/{len(checks)} waypoints OK, "
                            f"closest approach {min(cl):.2f}-{max(cl):.2f} m",
                            {"event": "waypoint_check_summary", "ok": ok, "n": len(checks)}))
     return recs

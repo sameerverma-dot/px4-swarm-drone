@@ -106,8 +106,8 @@ takeover.
 
 <!-- RESULTS:START -->
 Live run: Groq `openai/gpt-oss-120b` (answerer and judge), top_k=8, 16 questions, 2026-10-05.
-Full table in [`results/eval_table.md`](results/eval_table.md); per-question answers, citations and
-latencies in `results/eval_results.json`.
+Full table in [`results/eval_table_v1.md`](results/eval_table_v1.md); per-question answers, citations and
+latencies in `results/eval_results_v1.json`.
 
 | metric | live (gpt-oss-120b) | mock baseline |
 |---|---|---|
@@ -165,7 +165,7 @@ analyst/
   report.py     MissionReport schema, narrative checks, Markdown render
   evalset.py    eval questions generated from facts
   evaluate.py   scoring, eval_results.json, eval_table.md
-  tests/        32 offline tests (mock provider)
+  tests/        35 offline tests (mock provider)
   results/      sample_report.md, eval_table*.md, eval_results*.json
 ```
 

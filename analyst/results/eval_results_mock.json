@@ -7,23 +7,23 @@
     "judge_model": "mock",
     "top_k": 8,
     "n_questions": 16,
-    "run_at": "2026-10-05 16:05 UTC",
+    "run_at": "2026-10-05 16:52 UTC",
     "wall_time_s": 0.0
   },
   "summary": {
     "n": 16,
-    "correct": 5,
-    "accuracy": 0.3125,
+    "correct": 6,
+    "accuracy": 0.375,
     "by_type": {
       "numeric": {
         "n": 5,
-        "correct": 4,
-        "accuracy": 0.8
+        "correct": 3,
+        "accuracy": 0.6
       },
       "entity": {
         "n": 4,
-        "correct": 1,
-        "accuracy": 0.25
+        "correct": 3,
+        "accuracy": 0.75
       },
       "explanatory": {
         "n": 3,
@@ -307,31 +307,32 @@
       "type": "numeric",
       "question": "How many unique hazards are in the final hazard map?",
       "expected": 11,
-      "answer": "final hazard map (hazard_map.geojson): 11 hazards in total; by reporting drone: drone 0: 5, drone 1: 3, drone 2: 3; frame: PX4 local NED, home at origin, home lat 23.2127, lon 72.6846",
+      "answer": "final hazard map entry #1: person conf=0.87 at N=5.93 E=7.4 (lat 23.212753, lon 72.684672), reported by drone 0, detected at 10.0 m altitude",
       "answerable": true,
       "citations": [
-        "map:summary"
+        "map:1"
       ],
       "retrieved_ids": [
-        "map:summary",
         "map:1",
         "map:2",
         "map:3",
         "map:4",
         "map:5",
         "map:6",
-        "map:7"
+        "map:7",
+        "map:8",
+        "map:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
       "attempts": 1,
       "latency_s": 0.0,
       "citations_valid": true,
-      "citation_support": true,
+      "citation_support": false,
       "judge_score": null,
       "judge_reason": null,
       "judge_latency_s": null,
-      "correct": true
+      "correct": false
     },
     {
       "id": "n_own_hazards",
@@ -347,11 +348,11 @@
         "hazards_d0:summary",
         "hazards_d1:summary",
         "hazards_d2:summary",
+        "detector_node_0:L7",
+        "detector_node_0:gate",
+        "survey_node_0:gate",
         "survey_node_0:L50",
-        "survey_node_0:L13",
-        "survey_node_0:L18",
-        "survey_node_0:L23",
-        "survey_node_0:L28"
+        "survey_node_0:L1"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -382,7 +383,8 @@
         "targets:sw9",
         "targets:pairA",
         "targets:pairB",
-        "targets:bnd"
+        "targets:bnd",
+        "targets:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -409,11 +411,11 @@
         "track_d1:summary",
         "track_d0:summary",
         "track_d2:summary",
+        "track_d1:return",
         "survey_node_1:L54",
-        "survey_node_0:L54",
-        "survey_node_2:L54",
-        "track_d1:lane0",
-        "track_d1:lane1"
+        "track_d0:return",
+        "track_d2:return",
+        "survey_node_0:L54"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -431,7 +433,7 @@
       "type": "numeric",
       "question": "What lane spacing did the survey use, in metres?",
       "expected": 3.99,
-      "answer": "survey_node_0 T+8.7s: lane_spacing derived: detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude, 20% sidelap -> 3.99 m",
+      "answer": "survey_node_0 (drone 0) T+8.7s: lane_spacing derived: detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude, 20% sidelap -> 3.99 m",
       "answerable": true,
       "citations": [
         "survey_node_0:L1"
@@ -462,20 +464,21 @@
       "type": "entity",
       "question": "Which drone detected the first hazard of the mission?",
       "expected": "drone 0",
-      "answer": "final hazard map (hazard_map.geojson): 11 hazards in total; by reporting drone: drone 0: 5, drone 1: 3, drone 2: 3; frame: PX4 local NED, home at origin, home lat 23.2127, lon 72.6846",
+      "answer": "survey_node_0 (drone 0) T+121.5s: RTL: mission complete",
       "answerable": true,
       "citations": [
-        "map:summary"
+        "survey_node_0:L51"
       ],
       "retrieved_ids": [
-        "map:summary",
         "survey_node_0:L51",
         "survey_node_1:L51",
         "survey_node_2:L51",
         "map:1",
         "map:2",
         "map:3",
-        "map:4"
+        "map:4",
+        "map:5",
+        "map:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -505,8 +508,11 @@
         "track_d0:return",
         "track_d1:return",
         "track_d2:return",
-        "map:summary",
-        "ground_station:L159"
+        "ground_station:L159",
+        "survey_node_2:L73",
+        "track_d0:summary",
+        "track_d1:summary",
+        "track_d2:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -524,38 +530,38 @@
       "type": "entity",
       "question": "Which drone took over another drone's lanes during this mission?",
       "expected": "none",
-      "answer": "final hazard map (hazard_map.geojson): 11 hazards in total; by reporting drone: drone 0: 5, drone 1: 3, drone 2: 3; frame: PX4 local NED, home at origin, home lat 23.2127, lon 72.6846",
+      "answer": "survey_node_0 (drone 0) T+138.7s: VERIFY PASS | drone 0 | own lanes 8/8 | took over: none | waypoints 17/17 | returned=True | why=mission complete | csv=/home/sam/maps/swarm_20261002_180220/survey_track_d0_1790944479.csv",
       "answerable": true,
       "citations": [
-        "map:summary"
+        "survey_node_0:L72"
       ],
       "retrieved_ids": [
-        "map:summary",
         "survey_node_0:L72",
         "survey_node_1:L72",
         "survey_node_2:L72",
         "survey_node_0:L2",
         "survey_node_1:L2",
         "survey_node_2:L2",
-        "survey_node_0:L51"
+        "survey_node_0:L51",
+        "survey_node_1:L51"
       ],
       "qa_valid": true,
       "qa_error": null,
       "attempts": 1,
       "latency_s": 0.0,
       "citations_valid": true,
-      "citation_support": false,
+      "citation_support": true,
       "judge_score": null,
       "judge_reason": null,
       "judge_latency_s": null,
-      "correct": false
+      "correct": true
     },
     {
       "id": "e_dedup",
       "type": "entity",
       "question": "Which drone saw the person already logged as hazard d1-1 but did not log it again?",
       "expected": "drone 0",
-      "answer": "detector_node_0 T+112.7s: saw person at N=22.1 E=29.8 - already logged by drone 1 as d1-1, not logged again",
+      "answer": "detector_node_0 (drone 0) T+112.7s: saw person at N=22.1 E=29.8 - already logged by drone 1 as d1-1, not logged again",
       "answerable": true,
       "citations": [
         "detector_node_0:L47"
@@ -567,8 +573,8 @@
         "ground_station:L29",
         "sightings_d1:d1-1",
         "sightings_d0:d1-1",
-        "detector_node_0:L14",
-        "detector_node_2:L14"
+        "detector_node_1:L14",
+        "detector_node_0:L14"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -579,14 +585,14 @@
       "judge_score": null,
       "judge_reason": null,
       "judge_latency_s": null,
-      "correct": false
+      "correct": true
     },
     {
       "id": "x_no_takeover",
       "type": "explanatory",
       "question": "Why was there no lane takeover in this mission?",
       "expected": null,
-      "answer": "survey_node_0 T+138.7s: VERIFY PASS | drone 0 | own lanes 8/8 | took over: none | waypoints 17/17 | returned=True | why=mission complete | csv=/home/sam/maps/swarm_20261002_180220/survey_track_d0_1790944479.csv",
+      "answer": "survey_node_0 (drone 0) T+138.7s: VERIFY PASS | drone 0 | own lanes 8/8 | took over: none | waypoints 17/17 | returned=True | why=mission complete | csv=/home/sam/maps/swarm_20261002_180220/survey_track_d0_1790944479.csv",
       "answerable": true,
       "citations": [
         "survey_node_0:L72"
@@ -595,11 +601,11 @@
         "survey_node_0:L72",
         "survey_node_1:L72",
         "survey_node_2:L72",
-        "survey_node_0:L51",
-        "survey_node_1:L51",
-        "survey_node_2:L51",
         "survey_node_0:L2",
-        "survey_node_1:L2"
+        "survey_node_1:L2",
+        "survey_node_2:L2",
+        "survey_node_0:L51",
+        "survey_node_1:L51"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -617,20 +623,20 @@
       "type": "explanatory",
       "question": "How was the survey area divided among the drones?",
       "expected": null,
-      "answer": "mission config (run.json): num_drones=3, x_min=0.0, x_max=30.0, y_min=0.0, y_max=90.0, altitude=10.0, started=2026-10-02 18:02:20",
+      "answer": "survey_node_0 (drone 0) T+121.5s: survey pattern complete",
       "answerable": true,
       "citations": [
-        "run:config"
+        "survey_node_0:L49"
       ],
       "retrieved_ids": [
-        "run:config",
         "survey_node_0:L49",
         "survey_node_1:L49",
         "survey_node_2:L49",
         "survey_node_0:L7",
         "survey_node_1:L7",
         "survey_node_2:L7",
-        "survey_node_0:L50"
+        "survey_node_0:L50",
+        "survey_node_0:L51"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -648,7 +654,7 @@
       "type": "explanatory",
       "question": "How was the survey's lane spacing derived?",
       "expected": null,
-      "answer": "survey_node_0 T+8.7s: lane_spacing derived: detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude, 20% sidelap -> 3.99 m",
+      "answer": "survey_node_0 (drone 0) T+8.7s: lane_spacing derived: detection swath 4.99 m (camera footprint 23.71 m) at 10.0 m altitude, 20% sidelap -> 3.99 m",
       "answerable": true,
       "citations": [
         "survey_node_0:L1"
@@ -661,7 +667,8 @@
         "track_d0:lane1",
         "track_d0:lane2",
         "track_d0:lane3",
-        "track_d0:lane4"
+        "track_d0:lane4",
+        "track_d0:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -679,20 +686,20 @@
       "type": "unanswerable",
       "question": "What was the battery voltage of drone 1 at landing?",
       "expected": null,
-      "answer": "ground_station T+10.3s: drone 1: SURVEY",
+      "answer": "detector_node_1 (drone 1) T+5.0s: shared hazard list on '/swarm/hazards' as drone 1",
       "answerable": true,
       "citations": [
-        "ground_station:L6"
+        "detector_node_1:L6"
       ],
       "retrieved_ids": [
+        "detector_node_1:L6",
         "ground_station:L6",
         "ground_station:L134",
         "ground_station:L157",
-        "detector_node_1:L6",
-        "sightings_d1:below",
-        "ground_station:L29",
-        "ground_station:L40",
-        "ground_station:L52"
+        "survey_node_1:L49",
+        "survey_node_1:L50",
+        "survey_node_1:L51",
+        "detector_node_1:L2"
       ],
       "qa_valid": true,
       "qa_error": null,
@@ -710,7 +717,7 @@
       "type": "unanswerable",
       "question": "What was the wind speed during the mission?",
       "expected": null,
-      "answer": "survey_node_0 T+121.5s: RTL: mission complete",
+      "answer": "survey_node_0 (drone 0) T+121.5s: RTL: mission complete",
       "answerable": true,
       "citations": [
         "survey_node_0:L51"
@@ -740,17 +747,17 @@
       "type": "unanswerable",
       "question": "How many GPS satellites did drone 2 have during the survey?",
       "expected": null,
-      "answer": "ground_station T+10.0s: drone 2: SURVEY",
+      "answer": "survey_node_2 (drone 2) T+122.7s: survey pattern complete",
       "answerable": true,
       "citations": [
-        "ground_station:L5"
+        "survey_node_2:L49"
       ],
       "retrieved_ids": [
-        "ground_station:L5",
         "survey_node_2:L49",
         "survey_node_2:L7",
         "survey_node_2:L50",
         "survey_node_2:L51",
+        "ground_station:L5",
         "survey_node_2:L52",
         "survey_node_2:L53",
         "survey_node_2:L2"
@@ -778,13 +785,14 @@
       ],
       "retrieved_ids": [
         "hazards_d0:summary",
+        "detector_node_0:L4",
         "hazards_d1:summary",
         "hazards_d2:summary",
         "track_d0:lane0",
         "track_d0:lane1",
         "track_d0:lane2",
         "track_d0:lane3",
-        "track_d0:lane4"
+        "track_d0:summary"
       ],
       "qa_valid": true,
       "qa_error": null,
