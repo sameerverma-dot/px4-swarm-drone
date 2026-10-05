@@ -65,6 +65,7 @@ FILES=(
     tools/add_target.sh
     tools/diagnose_camera.sh
     tools/stop_sim.sh
+    tools/analyse_sightings.py
 )
 
 mkdir -p "$DIR"
