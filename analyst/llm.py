@@ -107,7 +107,8 @@ class GeminiProvider(Provider):
 
     def _raw(self, system: str, user: str) -> str:
         cfg = self._types.GenerateContentConfig(
-            system_instruction=system, response_mime_type="application/json", temperature=0.0)
+            system_instruction=system, response_mime_type="application/json", temperature=0.0,
+            automatic_function_calling=self._types.AutomaticFunctionCallingConfig(disable=True))
         resp = self._client.models.generate_content(model=self.model, contents=user, config=cfg)
         return resp.text or ""
 

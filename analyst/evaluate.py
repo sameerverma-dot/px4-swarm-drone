@@ -197,8 +197,16 @@ def run_eval(mission: str, provider: Provider | str | None = None,
     t_start = time.monotonic()
     for q in qs:
         ans = analyst.ask(q.question, top_k=top_k)
+        if ans.error and not ans.raw:
+            # No reply at all: the provider itself failed (bad key, unknown model, quota).
+            # Stop instead of scoring every question as wrong and writing a 0% table.
+            raise SystemExit(f"eval aborted at {q.id}: provider error, nothing written.\n  {ans.error}")
         rows.append(score_question(q, ans, jprov, corpus_ids, by_id))
-        print(f"  [{len(rows)}/{len(qs)}] {q.id:<18} {'PASS' if rows[-1]['correct'] else 'FAIL'}", flush=True)
+        r = rows[-1]
+        why = ""
+        if not r["correct"]:
+            why = f"  <- {r['qa_error'] or r['judge_reason'] or r['answer']}"[:160]
+        print(f"  [{len(rows)}/{len(qs)}] {q.id:<18} {'PASS' if r['correct'] else 'FAIL'}{why}", flush=True)
     out = {"meta": {"mission": mission, "provider": provider.name, "model": provider.model,
                     "judge_provider": jprov.name, "judge_model": jprov.model, "top_k": top_k,
                     "n_questions": len(qs), "run_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
