@@ -63,9 +63,12 @@ independently reproduces its §12.3 "final" row: 11/11 targets, 0 duplicates, 0.
 **BM25, not embeddings.** The logs are full of exact tokens where lexical match beats semantic similarity:
 drone ids, hazard ids like `d1-2`, event names (`VERIFY`, `RETURNING`), and timestamps. BM25 is deterministic,
 unit-testable and needs no API. The tokenizer normalises `drone 2` / `drone_2` to one token and maps
-`took over` / `take over` to `takeover`. Each record is also indexed with its event-type field tokens, so
-"which drone took over lanes" lands on the three `VERIFY ... took over: none` lines. Embeddings (or hybrid
-BM25 + embeddings) are a possible extension for paraphrased questions.
+`took over` / `take over` to `takeover`, and reduces plurals to singulars (`drones` → `drone`). Each record
+is also indexed with its event-type field tokens, so "which drone took over lanes" lands on the three
+`VERIFY ... took over: none` lines. `ask` sends the top-k hits plus the file summary record of every file
+those hits come from, so count questions see the per-file total and not just k rows. The eval's two
+remaining misses are meaning gaps ("divided" vs. `band`, "first" vs. the earliest `T+`). Hybrid
+BM25 + embeddings is the natural next step for those.
 
 **Grounded answers with a citation check.** The model must return `{answer, citations, answerable}`
 (validated with pydantic). Any citation that isn't the id of a record retrieved *for this question* is
@@ -105,48 +108,58 @@ takeover.
 ## Results
 
 <!-- RESULTS:START -->
-Live run: Groq `openai/gpt-oss-120b` (answerer and judge), top_k=8, 16 questions, 2026-10-05.
-Full table in [`results/eval_table_v1.md`](results/eval_table_v1.md); per-question answers, citations and
-latencies in `results/eval_results_v1.json`.
+Live runs: Groq `openai/gpt-oss-120b` (answerer and judge), top_k=8, the same 16 questions, 2026-10-05.
+**v1** is the first live run. **v2** comes after one round of retrieval fixes made in response to v1's
+failures (see below). Tables: [`results/eval_table.md`](results/eval_table.md) (v2),
+[`results/eval_table_v1.md`](results/eval_table_v1.md) (v1). Per-question answers, citations and latencies
+are in the matching `eval_results*.json`.
 
-| metric | live (gpt-oss-120b) | mock baseline |
-|---|---|---|
-| overall accuracy | **75% (12/16)** | 31% (5/16) |
-| numeric | 80% (4/5) | 80% (4/5) |
-| entity / event | 50% (2/4) | 25% (1/4) |
-| explanatory (judge ≥ 4) | 67% (2/3) | 0% (0/3) |
-| unanswerable correctly refused | **100% (4/4)** | 0% (0/4) |
-| false refusals on answerable questions | 25% (3/12) | 0% |
-| citation validity (cited ids exist and were retrieved) | **100% (9/9)** | 100% |
-| answers rejected by the citation check | 0 | 0 |
-| mean QA latency | 0.97 s | - |
+| metric | v1 | **v2** | mock baseline (v2 retrieval) |
+|---|---|---|---|
+| overall accuracy | 75% (12/16) | **88% (14/16)** | 38% (6/16) |
+| numeric | 80% (4/5) | 100% (5/5) | 60% (3/5) |
+| entity / event | 50% (2/4) | 75% (3/4) | 75% (3/4)* |
+| explanatory (judge ≥ 4) | 67% (2/3) | 67% (2/3) | 0% (0/3) |
+| unanswerable correctly refused | 100% (4/4) | **100% (4/4)** | 0% (0/4) |
+| false refusals on answerable questions | 25% (3/12) | 17% (2/12) | 0% |
+| citation validity (cited ids exist and were retrieved) | 100% (9/9) | **100% (10/10)** | 100% |
+| answers rejected by the citation check | 0 | 0 | 0 |
+| mean QA latency | 0.97 s | 1.56 s | - |
 
-The mock baseline answers with the top retrieved record, so it shows the floor and checks that the harness
-doesn't reward answering everything.
+The mock baseline answers with the top retrieved record. It shows the floor and checks that the harness
+doesn't reward answering everything. \*Its entity score is partly an artefact: a record's text now starts
+with e.g. `survey_node_0 (drone 0)`, so repeating any record can mention the expected drone by accident.
 
-**Example (live, from the eval run):**
+**Caveat:** the v2 fixes were chosen by looking at v1's failures on these same 16 questions. So v2 is an
+optimistic estimate, and a fresh question set would be the honest test. The fixes are general (they change
+how every record is indexed and shown), not per-question rules. Two misses were left unfixed rather than
+patched.
+
+**Example (live, v2):**
 
 > **Q:** Which drone took over another drone's lanes during this mission?
-> **A:** No drone took over another drone's lanes; each drone's record shows took over: none.
+> **A:** No drone took over another drone's lanes during this mission.
 > **Citations:** `survey_node_0:L72`, `survey_node_1:L72`, `survey_node_2:L72`. These are the three
 > `VERIFY PASS | drone N | own lanes 8/8 | took over: none ...` lines.
 
-**Failure analysis.** None of the 4 misses is a fabricated fact. Three are retrieval misses and one is a
-record-wording issue:
+**What changed v1 → v2, and why**
 
-| question | what happened | cause |
-|---|---|---|
-| How many ground-truth targets? (11) | answered "8" | top_k=8 returned 8 single-target records but not the `targets:summary` record that states 11. The model counted what it saw |
-| Which drone detected the first hazard? (drone 0) | refused | the retrieved map entries carry no time. The `T+` hazard log lines weren't in the top 8 |
-| Which drone saw d1-1 but didn't log it again? (drone 0) | refused | the right record was retrieved, but its text says `detector_node_0 ...` and never "drone 0" |
-| How was the area divided among the drones? | refused | no stemming: "drones" doesn't match the token "drone", so the `band i = shared east [...]` lines weren't retrieved |
+| v1 miss | cause | fix | v2 |
+|---|---|---|---|
+| "How many ground-truth targets?" answered **8** (truth: 11) | top_k=8 returned 8 single-target rows. The model counted them; the `targets:summary` record wasn't retrieved | `ask` adds the file summary record of every file its hits come from | ✅ "11", citing `targets:summary` |
+| "Which drone saw d1-1 but didn't log it again?" refused | right record retrieved, but its text said `detector_node_0 ...` and never "drone 0" | log records name their drone: `detector_node_0 (drone 0) ...` | ✅ "drone 0", citing `detector_node_0:L47` |
+| "How was the area divided among the drones?" refused | no word overlap between "divided" and the `band 0 = shared east [0, 30]` lines. Plural matching ("drones" → "drone") was added but doesn't bridge this | none: a meaning gap that lexical search can't close (an embeddings / hybrid case) | ❌ still refused |
+| "Which drone detected the first hazard?" refused | the retrieved map entries carry no time; the `T+` hazard-log lines aren't in the top 8 | none | ❌ still refused |
 
-Two caveats, stated plainly:
-- The 100% citation-support figure is inflated by at least one case. For the targets question, the expected
-  number "11" matched the coordinate `N=11` in a cited record.
-- The report narrative passed the number guard, but it says hazard confidences were "between 0.68 and
-  0.92". That mixes first-report confidence (0.68 is d0-1's first report) with final-map confidence
-  (0.86–0.92). The guard checks that a number appears in the facts, not that it is used correctly.
+All misses, in both runs, are refusals or an undercount from incomplete evidence. No answer cited a record
+it wasn't given, and none stated a fact absent from the records.
+
+**Known measurement limits:**
+- Citation support is a regex check. In v1 it counted the targets answer as supported because "11" matched
+  the coordinate `N=11` in a cited record. v2 cites the summary that actually states 11.
+- The narrative number guard checks that a number appears in the facts, not that it's used correctly. The v1
+  report (`results/sample_report_v1.md`) said confidences were "between 0.68 and 0.92", mixing d0-1's
+  first-report confidence with final-map values. The v2 report says 0.86–0.92, which matches the final map.
 <!-- RESULTS:END -->
 
 ## Layout
