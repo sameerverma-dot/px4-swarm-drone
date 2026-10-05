@@ -66,7 +66,7 @@ class Analyst:
         self.provider = provider if isinstance(provider, Provider) else get_provider(provider)
 
     def retrieve(self, question: str, top_k: int = config.TOP_K) -> list[Record]:
-        return [r for r, _ in self.index.search(question, top_k)]
+        return [r for r, _ in self.index.search(question, top_k, with_summaries=True)]
 
     def ask(self, question: str, top_k: int = config.TOP_K) -> Answer:
         hits = self.retrieve(question, top_k)

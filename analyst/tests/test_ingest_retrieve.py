@@ -51,3 +51,21 @@ def test_bm25_hazard_id_and_takeover(index):
     assert top.id == "detector_node_0:L47"
     top3 = [r.id for r, _ in index.search("which drone took over lanes", k=3)]
     assert all(i.endswith(":L72") and i.startswith("survey_node_") for i in top3)
+
+
+def test_stem_plurals_but_not_ids():
+    from analyst.retrieve import stem, tokenize
+    assert stem("drones") == "drone" and stem("batteries") == "battery" and stem("pass") == "pass"
+    assert stem("d1-2") == "d1-2" and stem("6536") == "6536"
+    assert "drone" in tokenize("drone 2 landed") and "drone2" in tokenize("drone 2 landed")
+
+
+def test_log_records_name_their_drone(records):
+    r = next(r for r in records if r.id == "detector_node_0:L47")
+    assert r.text.startswith("detector_node_0 (drone 0) ")
+
+
+def test_file_summaries_added_to_hits(index):
+    plain = [r.id for r, _ in index.search("How many ground-truth targets were placed?", 8)]
+    aug = [r.id for r, _ in index.search("How many ground-truth targets were placed?", 8, with_summaries=True)]
+    assert aug[:len(plain)] == plain and "targets:summary" in aug
