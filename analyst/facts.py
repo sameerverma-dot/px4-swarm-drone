@@ -161,6 +161,8 @@ def compute_facts(mission: str) -> dict:
                                      "altitude_m": float(mm.group(3)),
                                      "sidelap_pct": int(mm.group(4)),
                                      "lane_spacing_m": float(mm.group(5))}
+            if (mm := re.search(r"takeover=(\w+)", ln.msg)):
+                info["takeover_enabled"] = mm.group(1) == "on"
             if ln.msg.startswith("own lane") and "done" in ln.msg:
                 info["lanes_done_logged"] += 1
             if ln.msg.startswith("Offboard engaged"):
