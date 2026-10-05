@@ -29,7 +29,7 @@ plugin, which fails to import inside a plain venv. Run the tests with
 
 `--mission <id>` picks a folder under `analyst/data/`. It's optional when there is only one.
 Keys are read only from the environment: `GEMINI_API_KEY` (default live provider) or `GROQ_API_KEY`.
-Other settings are environment variables too: `ANALYST_GEMINI_MODEL` (default `gemini-3.8-flash`),
+Other settings are environment variables too: `ANALYST_GEMINI_MODEL` (default `gemini-3.8-flash`), `ANALYST_GROQ_MODEL` (default `openai/gpt-oss-120b`),
 `ANALYST_TOP_K` (8) and `ANALYST_MIN_CALL_INTERVAL_S` (4.5 s spacing for free-tier rate limits).
 
 ## Data → records

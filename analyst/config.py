@@ -12,7 +12,7 @@ RESULTS_DIR = Path(os.environ.get("ANALYST_RESULTS_DIR", PKG_DIR / "results"))
 DEFAULT_PROVIDER = os.environ.get("ANALYST_PROVIDER", "mock")
 MODELS = {
     "gemini": os.environ.get("ANALYST_GEMINI_MODEL", "gemini-3.8-flash"),
-    "groq": os.environ.get("ANALYST_GROQ_MODEL", "llama-3.3-70b-versatile"),
+    "groq": os.environ.get("ANALYST_GROQ_MODEL", "openai/gpt-oss-120b"),
     "mock": "mock",
 }
 API_KEY_ENV = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY"}
