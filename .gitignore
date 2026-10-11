@@ -19,3 +19,4 @@ working_doc/
 
 # pytest run caches (src/*/.pytest_cache, ./.pytest_cache)
 .pytest_cache/
+analyst/.venv/
