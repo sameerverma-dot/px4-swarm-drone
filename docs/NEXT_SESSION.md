@@ -11,6 +11,9 @@ this round) · `PHASE1_ROADMAP.md` (deliverables & grading) · `SWARM_PLAN.md`
 The previous version of this file (the 1 Sep session log and its plan) is in
 git history; everything in its plan is done.
 
+**24 Oct:** the machine is now Ubuntu 24.04 + ROS 2 Jazzy; every gate in
+`MIGRATION_UBUNTU_24.md` passed with 22.04's results (`PROGRESS.md` §13).
+
 ---
 
 ## 0. Where things stand
@@ -121,6 +124,8 @@ above and is the largest risk to the grade.
 
 ## 4. Pre-flight checklist
 
+0. **Charger in, `powerprofilesctl set performance`.** On `balanced` the 3-drone
+   sim runs at ~0.6x real time and targets get logged twice (`PROGRESS.md` §13).
 1. Run the launcher from a **normal terminal**, never inside tmux.
 2. `bash ~/px4_ros_ws/tools/check_system.sh` - want 0 FAIL. By hand:
    `ros2 topic echo /fmu/out/vehicle_local_position_v1 --qos-reliability best_effort --once`

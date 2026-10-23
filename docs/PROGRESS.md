@@ -97,8 +97,10 @@ there is still only one drone.
 
 ## 2. Environment
 
-- Laptop: HP OMEN 16, **Ubuntu 22.04** (glibc 2.35), **NVIDIA RTX 4060** (Optimus/hybrid) + Intel iGPU.
-- **ROS 2 Humble**, user `sam`, home `/home/sam`.
+- Laptop: HP OMEN 16 (i7-14650HX), **Ubuntu 24.04** (glibc 2.39) since 24 Oct
+  (was 22.04 — §13), **NVIDIA RTX 4060** (Optimus/hybrid) + Intel iGPU.
+- **ROS 2 Jazzy** (was Humble), user `sam`, home `/home/sam`. Python 3.12;
+  ML stack in `~/ros_venv`.
 - Gazebo **Harmonic** (gz-sim 8.15).
 - GitHub repo: `github.com/sameerverma-dot/px4-swarm-drone` (branch `main`).
 
@@ -942,3 +944,60 @@ apart and the band 0/1 boundary target in band 1, three in band 2.
 - A horizontal yield ignores other peers' positions and the area boundary.
 - The rest of 11.5 stands: onboard compute budget, a silent-but-flying drone
   past its ETA, takeover of a takeover, wall-clock hazard stamps, hardware.
+
+---
+
+## 13. Ubuntu 24.04 + ROS 2 Jazzy — migrated 24 Oct
+
+Moved from Ubuntu 22.04 + Humble following `docs/MIGRATION_UBUNTU_24.md`, keeping
+the same PX4 commit (`9eafff1a4c`, 1280×960 camera edit re-applied) and the same
+`px4_msgs` / `px4_ros_com` commits. **Every gate in the guide passes with 22.04's
+results.**
+
+| # | Gate | 24.04 result | 22.04 baseline |
+|---|---|---|---|
+| 1 | swarm unit tests | 44 passed | 44 |
+| 2 | analyst tests | 35 passed | 35 |
+| 3 | single-drone stack (`check_system.sh`) | 22 passed, 0 failed | 0 failed |
+| 4 | single-drone mission | `VERIFY PASS`, target 0.1 m off | 0.19–0.3 m |
+| 5 | 3-drone stack | all `sensors OK`, 28 passed, 0 failed | 0 failed |
+| 6 | 3-drone mission, one target per band | 3 targets → 3 hazards, 0.22–0.36 m | — |
+| 7 | 11-target calibration flight | **11/11, 0 duplicates, 0.09–0.24 m**; along-track +0.01 m, scatter 0.26 m RMS | 11/11, 0, 0.09–0.29 m; +0.01 m; 0.25 m |
+
+`pose_lag_s` 0.25, `min_sep_m` 1.5 and the 4 m lanes carry over unchanged.
+
+### 13.1 What had to change
+
+- **Micro XRCE-DDS Agent rebuilt** (v3.0.1, same version). The 22.04 binary in
+  `/usr/local/bin` linked `libspdlog.so.1` / `libfmt.so.8`, which 24.04 does not
+  have, and would not start.
+- **Python ML stack in a venv.** 24.04 refuses `pip install --user` (PEP 668).
+  `~/ros_venv` (`--system-site-packages`, numpy 1.26.4 kept < 2, setuptools
+  79 < 80) holds torch 2.14 (CUDA) and ultralytics 8.4; `~/.bashrc` puts it on
+  `PYTHONPATH` after sourcing Jazzy, so the system Python that ROS nodes use
+  imports it. `check_system.sh` hints now point there instead of `pip --user`.
+- `analyst/.venv` recreated (it had no pip).
+- `check_system.sh`: hint says `jazzy`; new checks for the power profile and
+  mains power.
+
+### 13.2 The one real problem: CPU power profile
+
+The first 3-drone mission on 24.04 logged two of its three targets twice, 1.7–2 m
+apart along the lane. Pose and attitude reached the detectors 0.6–4 s after
+PX4 stamped them (22.04: ≤ 18 ms), pose rate dropped to 22–44 Hz, camera to
+3–8 fps, and Gazebo's real-time factor dipped to **0.59**. Gazebo was on the
+NVIDIA GPU; the CPU was the bottleneck - **1.2 GHz average** under load in the
+`balanced` power profile, on an i7-14650HX that boosts to ~5 GHz.
+
+`powerprofilesctl set performance` with the charger in: real-time factor 1.00,
+pose 49 Hz, delay ~9 ms, and the same flight clean (3 targets → 3 hazards).
+Gate 7 was then flown in that mode. **Fly only in `performance`, on mains.**
+
+### 13.3 Traps on 24.04
+
+- `gz` comes from Jazzy's vendor packages; with ROS not sourced it prints
+  "I cannot find any available 'gz' command" and PX4 times out waiting for
+  the Gazebo world. Launch the sim from a terminal that sourced `~/.bashrc`.
+- `prime-run` is not installed; the launchers fall back to the same NVIDIA
+  offload environment variables (verified: `gz sim` on the RTX 4060).
+- Tests from a ROS-sourced shell: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`.
