@@ -48,7 +48,27 @@ hdr "0 · environment"
 if [[ -n "${ROS_DISTRO:-}" ]]; then
     ok "ROS 2 sourced" "$ROS_DISTRO"
 else
-    no "ROS 2 sourced" "ROS_DISTRO unset" "source /opt/ros/humble/setup.bash"
+    no "ROS 2 sourced" "ROS_DISTRO unset" "source /opt/ros/jazzy/setup.bash"
+fi
+
+# Power. On 24.04 the 'balanced' profile held the CPU near 1.2 GHz under the
+# 3-drone sim: Gazebo fell to 0.59x real time, pose reached the detectors up to
+# 4 s late, and two of three targets were logged twice (24 Oct). 'performance'
+# + charger: 1.00x, 9 ms, clean. On battery the CPU is capped the same way.
+if command -v powerprofilesctl >/dev/null 2>&1; then
+    prof=$(powerprofilesctl get 2>/dev/null)
+    if [[ "$prof" == "performance" ]]; then
+        ok "power profile" "performance"
+    else
+        no "power profile" "'$prof' - sim runs slow, geotags go wrong" \
+           "powerprofilesctl set performance   (and plug the charger in)"
+    fi
+fi
+ac=$(cat /sys/class/power_supply/{AC,ADP}*/online 2>/dev/null | head -1)
+if [[ "$ac" == "0" ]]; then
+    no "on mains power" "on battery - CPU is capped" "plug the charger in"
+elif [[ "$ac" == "1" ]]; then
+    ok "on mains power" ""
 fi
 
 if [[ -f "$WS/install/setup.bash" ]]; then
@@ -226,17 +246,22 @@ py_has() { python3 -c "import $1" >/dev/null 2>&1; }
 # fixes, and calling both "missing" sends you in a circle: pip replies "already
 # satisfied" while the check keeps failing. Same trap as a topic being listed
 # but not published - report what is actually wrong.
+# Ubuntu 24.04 refuses `pip install --user` (PEP 668). ROS nodes get the ML
+# stack from ~/ros_venv via the PYTHONPATH line in ~/.bashrc
+# (docs/MIGRATION_UBUNTU_24.md section 9) - a terminal opened before that line
+# was added, or a shell that skipped ~/.bashrc, sees none of it.
+VENV_HINT="source ~/.bashrc  (PYTHONPATH -> ~/ros_venv); if still missing: ~/ros_venv/bin/pip install"
 py_check() {   # module  pip-name  [note]
     local err
     if err=$(python3 -c "import $1" 2>&1); then
         ok "python: $1" "${3:-}"
     elif [[ "$err" == *"No module named"* ]]; then
-        no "python: $1" "not installed" "pip install --user $2"
+        no "python: $1" "not installed" "$VENV_HINT $2"
     else
         local why
         why=$(printf '%s' "$err" | grep -v '^\s*File \|^\s*$\|^Traceback' | tail -1 | cut -c1-58)
         no "python: $1" "INSTALLED BUT BROKEN - $why" \
-           "pip install --user --upgrade $2     # usually a numpy ABI mismatch"
+           "~/ros_venv/bin/pip install --upgrade $2   # usually a numpy ABI mismatch: keep numpy<2"
     fi
 }
 
@@ -256,17 +281,17 @@ PY
         ok "torch + CUDA" "$TV on ${GPU//_/ }"
     else
         no "torch + CUDA" "torch $TV, CUDA NOT available -> YOLO on CPU" \
-           "pip install --user --force-reinstall torch --index-url https://download.pytorch.org/whl/cu121"
+           "~/ros_venv/bin/pip install --force-reinstall torch torchvision"
     fi
 else
-    no "torch" "missing" "pip install --user torch"
+    no "torch" "missing" "$VENV_HINT torch torchvision"
 fi
 
 # setuptools >= 80 silently breaks colcon
 if py_has setuptools; then
     SV=$(python3 -c "import setuptools;print(setuptools.__version__)" 2>/dev/null)
     if [[ "${SV%%.*}" -ge 80 ]] 2>/dev/null; then
-        no "setuptools < 80" "$SV breaks colcon" 'pip install --user "setuptools==70.3.0"'
+        no "setuptools < 80" "$SV breaks colcon" '~/ros_venv/bin/pip install "setuptools<80"'
     else
         ok "setuptools < 80" "$SV"
     fi

@@ -12,8 +12,9 @@ that returns early or goes silent has its lanes taken over by a neighbour;
 detections are de-duplicated drone-to-drone; peers keep separation. Geotags land
 0.09–0.29 m from truth (11 of 11 targets, calibrated from flight data).
 Remaining on software: landmine weights in place of the COCO `person` stand-in,
-and terrain following. **Hardware (Track B) is 50 % of the grade and is at
-zero** — the project's largest risk. Details in `docs/PROGRESS.md` §11–12.
+and terrain following. Runs on **Ubuntu 24.04 + ROS 2 Jazzy** (migrated 24 Oct,
+same results as on 22.04 — set the laptop to `performance` power mode first).
+**Hardware (Track B) is 50 % of the grade and is at zero** — the project's largest risk. Details in `docs/PROGRESS.md` §11–13.
 
 The governing constraints: detection needs ~24 px on target, which caps flight
 altitude at **5.6 m** (640 px capture) or **11.2 m** (1280 px); and the detector
@@ -138,7 +139,7 @@ once, then `docs/CHEATSHEET.md` as a reference.
 2. **A listed topic is not a published topic.** `ros2 topic list` counts
    subscribers too. Check with
    `ros2 topic echo <topic> --qos-reliability best_effort --once` — `echo`, not
-   `hz`, because in Humble only `echo` accepts that flag, and `/fmu/out/*`
+   `hz`, because in some distros only `echo` accepts that flag, and `/fmu/out/*`
    publishes BEST_EFFORT, so a default RELIABLE subscription receives nothing
    and a live topic looks dead. Note also that this build publishes on the
    **versioned** names (`/fmu/out/vehicle_local_position_v1`).

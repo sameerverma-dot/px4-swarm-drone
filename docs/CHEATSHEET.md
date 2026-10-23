@@ -155,7 +155,11 @@ Stop everything: `bash ~/px4_ros_ws/tools/stop_sim.sh` (from anywhere). **Not**
 
 ## 5. Runbooks — 1 drone and the swarm
 
-Two rules that apply to both, and cause most failed runs:
+Three rules that apply to both, and cause most failed runs:
+
+- **Laptop in `performance` mode, charger in** (`powerprofilesctl set
+  performance`). In `balanced` or on battery the 3-drone sim runs at ~0.6x real
+  time and the same target gets logged twice. `check_system.sh` flags it.
 
 - **`cd ~/px4_ros_ws` first.** `source install/setup.bash` is a *relative* path.
   Run it from `~` and you get `bash: install/setup.bash: No such file or

@@ -1,7 +1,19 @@
 # PX4 + ROS 2 + Gazebo + QGroundControl — how to run it
 
-*Updated 1 Sep 2026. For what the system **is**, read `SYSTEM_GUIDE.md`.
-For current status and the next-session plan, `PROGRESS.md` / `NEXT_SESSION.md`.*
+*Updated 24 Oct 2026 for **Ubuntu 24.04 + ROS 2 Jazzy**. For what the system
+**is**, read `SYSTEM_GUIDE.md`. For current status and the next-session plan,
+`PROGRESS.md` / `NEXT_SESSION.md`. Setting up a new machine:
+`MIGRATION_UBUNTU_24.md`.*
+
+**Before any flight on the laptop:** charger in, and
+
+```bash
+powerprofilesctl set performance
+```
+
+In `balanced` (or on battery) the CPU sits near 1.2 GHz, Gazebo falls to ~0.6x
+real time with three drones, and geotags go wrong (PROGRESS §13).
+`tools/check_system.sh` checks both.
 
 ---
 
@@ -225,8 +237,17 @@ PX4_HOME_LAT=23.2130 PX4_HOME_LON=72.6850 PX4_HOME_ALT=30 \
 
 ## 8. Notes
 
-- **GPU:** the script forces the RTX 4060 via `prime-run` so Gazebo is smooth.
-  Confirm with `watch -n1 nvidia-smi` — you should see `gz sim` using the GPU.
+- **GPU:** the script forces the RTX 4060 (via `prime-run` if installed, else the
+  same NVIDIA offload environment variables) so Gazebo is smooth. Confirm with
+  `watch -n1 nvidia-smi` — you should see `gz sim` using the GPU.
+- **Python on 24.04:** `pip install --user` is refused (PEP 668). The ML stack
+  (torch, ultralytics) lives in `~/ros_venv` (created with
+  `--system-site-packages`, numpy kept < 2, setuptools < 80), and a line in
+  `~/.bashrc` puts it on `PYTHONPATH` for the system Python that ROS nodes use.
+  A terminal opened before that line existed needs `source ~/.bashrc`.
+- **`gz`:** comes from ROS Jazzy's vendor packages and needs ROS sourced
+  (`GZ_CONFIG_PATH`). In a shell without it, `gz` prints "I cannot find any
+  available 'gz' command" and PX4 times out waiting for the Gazebo world.
 - **Arming without a ground station:** if you run without QGC and hit
   "Preflight Fail: No connection to the GCS", set in the PX4 pane:
   `param set NAV_DLL_ACT 0` and `param set CBRK_SUPPLY_CHK 894281`.
@@ -236,6 +257,7 @@ PX4_HOME_LAT=23.2130 PX4_HOME_LON=72.6850 PX4_HOME_ALT=30 \
   the drone shoots up and circles after the survey finishes — expected, not a bug.
 - **Move `~/maps/hazard_points.csv` aside between runs** or results from different
   flights will be mixed together in one file.
-- **`pip install ultralytics` breaks colcon** by bumping setuptools past 80.
+- **`pip install ultralytics` breaks colcon** by bumping setuptools past 80 —
+  install with `"setuptools<80"` in the same command (into `~/ros_venv`).
   Fix: `pip install --user "setuptools==70.3.0"`.
 - Plug in the charger — the full sim is heavy on the battery.
